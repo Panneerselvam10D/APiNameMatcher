@@ -11,8 +11,6 @@ import {
   TableHead, 
   TableRow,
   Typography,
-  UploadFileIcon,
-  PlayArrowIcon,
   Snackbar,
   Alert,
   Box,
