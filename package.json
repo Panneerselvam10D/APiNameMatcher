@@ -16,9 +16,9 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-scripts": "5.0.1",
+    "strip-ansi": "^7.1.0",
     "web-vitals": "^3.0.0",
-    "xlsx": "^0.18.5",
-    "strip-ansi": "^7.1.0"
+    "xlsx": "^0.18.5"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -53,5 +53,8 @@
   "cacheDirectories": [
     "node_modules",
     "public"
-  ]
+  ],
+  "devDependencies": {
+    "http-proxy-middleware": "^3.0.5"
+  }
 }

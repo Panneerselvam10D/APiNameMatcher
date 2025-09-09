@@ -14,7 +14,7 @@ const KEYCLOAK_CONFIG = {
 // Create axios instance with default config
 const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000, // 30 seconds
+  // Removed timeout to allow requests to complete regardless of duration
   headers: {
     'Accept': 'application/json',
     'Accept-Language': 'en-US,en;q=0.9',

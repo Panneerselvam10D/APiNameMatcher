@@ -192,62 +192,139 @@ function App() {
     return { onlyInV2, onlyInV4 };
   };
 
-  const exportToExcel = () => {
+  // Helper function to split SDN list into chunks that fit within Excel's cell limit
+  const splitSdnsForExport = (sdns) => {
+    if (sdns.length === 0) return [{ content: 'No matches', isContinuation: false }];
+    
+    const MAX_CHUNK_SIZE = 30000; // Leave some buffer under 32,767 limit
+    const result = [];
+    let currentChunk = [];
+    let currentLength = 0;
+    
+    for (const sdn of sdns) {
+      const sdnText = `${sdn.id} - ${sdn.name}\n`;
+      
+      if (currentLength + sdnText.length > MAX_CHUNK_SIZE && currentChunk.length > 0) {
+        result.push({
+          content: currentChunk.join('').trim(),
+          isContinuation: result.length > 0
+        });
+        currentChunk = [];
+        currentLength = 0;
+      }
+      
+      currentChunk.push(sdnText);
+      currentLength += sdnText.length;
+    }
+    
+    // Add the last chunk if not empty
+    if (currentChunk.length > 0) {
+      result.push({
+        content: currentChunk.join('').trim(),
+        isContinuation: result.length > 0
+      });
+    }
+    
+    return result;
+  };
+
+  const exportToExcel = async () => {
     if (results.length === 0) {
       showSnackbar('No data to export', 'warning');
       return;
     }
 
     try {
-      const exportData = results.map(result => {
-        // Get unique SDNs for V2 and V4
-        const v2Sdns = result.v2?.responses?.length > 0
-          ? result.v2.responses.map(item => ({
-              id: item.rulesDetails?.sdnid || 'N/A',
-              name: item.rulesDetails?.sdnname || 'N/A'
-            }))
-          : [];
-
-        const v4Sdns = result.v4?.responses?.length > 0
-          ? result.v4.responses.map(item => ({
-              id: item.rulesDetails?.sdnid || 'N/A',
-              name: item.rulesDetails?.sdnname || 'N/A'
-            }))
-          : [];
-
-        // Find SDNs only in V2 or only in V4
-        const onlyInV2 = v2Sdns.filter(v2 => 
-          !v4Sdns.some(v4 => v4.id === v2.id)
-        );
-        
-        const onlyInV4 = v4Sdns.filter(v4 => 
-          !v2Sdns.some(v2 => v2.id === v4.id)
-        );
-
-        // Format SDN lists for display (ID - Name only)
-        const formatSdns = (sdns) => {
-          if (sdns.length === 0) return 'No matches';
-          return sdns.map(s => `${s.id} - ${s.name}`).join('\n');
-        };
-
-        return {
-          'Name': result.name,
-          'V2 Duration (ms)': result.v2?._duration ? result.v2._duration.toFixed(2) : 'N/A',
-          'V2 SDN Matches': formatSdns(v2Sdns),
-          'Only in V2': formatSdns(onlyInV2),
-          'V4 Duration (ms)': result.v4?._duration ? result.v4._duration.toFixed(2) : 'N/A',
-          'V4 SDN Matches': formatSdns(v4Sdns),
-          'Only in V4': formatSdns(onlyInV4),
-          'Total Duration (ms)': result._totalDuration ? result._totalDuration.toFixed(2) : 'N/A'
-        };
-      });
-
-      const ws = XLSX.utils.json_to_sheet(exportData);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Screening Results');
+      // Show loading indicator
+      const loadingSnackbar = showSnackbar('Preparing export...', 'info', 0);
       
-      // Auto-size columns
-      const wscols = [
+      // Process data in chunks to avoid memory issues
+      const CHUNK_SIZE = 100; // Smaller chunk size for better responsiveness
+      const exportData = [];
+      
+      for (let i = 0; i < results.length; i += CHUNK_SIZE) {
+        const chunk = results.slice(i, i + CHUNK_SIZE);
+        
+        // Process chunk
+        for (const result of chunk) {
+          // Get unique SDNs for V2 and V4
+          const v2Sdns = result.v2?.responses?.length > 0
+            ? result.v2.responses.map(item => ({
+                id: item.rulesDetails?.sdnid || 'N/A',
+                name: item.rulesDetails?.sdnname || 'N/A'
+              }))
+            : [];
+
+          const v4Sdns = result.v4?.responses?.length > 0
+            ? result.v4.responses.map(item => ({
+                id: item.rulesDetails?.sdnid || 'N/A',
+                name: item.rulesDetails?.sdnname || 'N/A'
+              }))
+            : [];
+
+          // Find SDNs only in V2 or only in V4
+          const onlyInV2 = v2Sdns.filter(v2 => 
+            !v4Sdns.some(v4 => v4.id === v2.id)
+          );
+          
+          const onlyInV4 = v4Sdns.filter(v4 => 
+            !v2Sdns.some(v2 => v2.id === v4.id)
+          );
+
+          // Split SDN lists into chunks that fit within Excel's cell limit
+          const v2Chunks = splitSdnsForExport(v2Sdns);
+          const onlyV2Chunks = splitSdnsForExport(onlyInV2);
+          const v4Chunks = splitSdnsForExport(v4Sdns);
+          const onlyV4Chunks = splitSdnsForExport(onlyInV4);
+          
+          // Calculate which version is faster
+          const v2Faster = result.v2?._duration && result.v4?._duration && 
+                          result.v2._duration < result.v4._duration;
+          const v4Faster = result.v2?._duration && result.v4?._duration && 
+                          result.v4._duration < result.v2._duration;
+          
+          // Determine how many rows we'll need for this result
+          const maxChunks = Math.max(
+            v2Chunks.length,
+            onlyV2Chunks.length,
+            v4Chunks.length,
+            onlyV4Chunks.length,
+            1 // At least one row
+          );
+          
+          // Create rows for this result
+          for (let i = 0; i < maxChunks; i++) {
+            const isFirstRow = i === 0;
+            const rowData = {
+              'Name': isFirstRow ? result.name : `(cont.) ${result.name}`,
+              'V2 Duration (ms)': isFirstRow ? (result.v2?._duration ? result.v2._duration.toFixed(2) : 'N/A') : '',
+              'V2 SDN Matches': v2Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
+              'Only in V2': onlyV2Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
+              'V4 Duration (ms)': isFirstRow ? (result.v4?._duration ? result.v4._duration.toFixed(2) : 'N/A') : '',
+              'V4 SDN Matches': v4Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
+              'Only in V4': onlyV4Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
+              'V2 Faster?': isFirstRow ? (v2Faster ? '✓' : '') : '',
+              'V4 Faster?': isFirstRow ? (v4Faster ? '✓' : '') : '',
+              'Total Duration (ms)': isFirstRow ? (result._totalDuration ? result._totalDuration.toFixed(2) : 'N/A') : ''
+            };
+            
+            exportData.push(rowData);
+          }
+        } // End of result processing
+        
+        // Update progress
+        const progress = Math.min(100, Math.round(((i + chunk.length) / results.length) * 100));
+        showSnackbar(`Processing... ${progress}%`, 'info', 0, loadingSnackbar);
+        
+        // Allow UI to update
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      // Create worksheet
+      const ws = XLSX.utils.json_to_sheet(exportData);
+      
+      // Set column widths
+      ws['!cols'] = [
         {wch: 30}, // Name
         {wch: 15}, // V2 Duration
         {wch: 40}, // V2 SDN Matches
@@ -255,9 +332,14 @@ function App() {
         {wch: 15}, // V4 Duration
         {wch: 40}, // V4 SDN Matches
         {wch: 40}, // Only in V4
+        {wch: 10}, // V2 Faster?
+        {wch: 10}, // V4 Faster?
         {wch: 15}  // Total Duration
       ];
-      ws['!cols'] = wscols;
+      
+      // Create workbook and add worksheet
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Screening Results');
       
       // Add some styling to header row
       const range = XLSX.utils.decode_range(ws['!ref']);
@@ -271,14 +353,20 @@ function App() {
         }
       }
       
-      const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-      const data = new Blob([excelBuffer], { type: 'application/octet-stream' });
-      saveAs(data, `screening-results-${new Date().toISOString().split('T')[0]}.xlsx`);
+      // Generate and save the Excel file
+      showSnackbar('Generating Excel file...', 'info', 0, loadingSnackbar);
       
-      showSnackbar('Exported to Excel successfully!', 'success');
+      // Use writeFile with options for better performance
+      XLSX.writeFile(wb, `screening_results_${new Date().toISOString().slice(0, 10)}.xlsx`, {
+        bookType: 'xlsx',
+        type: 'array',
+        compression: true
+      });
+      
+      showSnackbar('Export successful!', 'success');
     } catch (error) {
       console.error('Error exporting to Excel:', error);
-      showSnackbar('Failed to export to Excel', 'error');
+      showSnackbar(`Export failed: ${error.message}`, 'error');
     }
   };
 
@@ -308,11 +396,18 @@ function App() {
     const renderTable = (version = 'combined') => {
       // Define base headers
       const baseHeaders = [
-        '#', 'Name', 'API Version', 'SDN ID', 'SDN Name', 'Duration'
+        '#', 'Name', 'API Version', 'SDN ID', 'SDN Name', 'Duration', 
+        'V2 Faster?', 'V4 Faster?'
       ];
       
       // For combined view, add additional columns
-      const combinedHeaders = [...baseHeaders, 'Only in V2', 'Only in V4'];
+      const combinedHeaders = [
+        ...baseHeaders.slice(0, -2), // Remove the last two columns (V2/V4 Faster?)
+        'Only in V2', 
+        'Only in V4',
+        'V2 Faster?', 
+        'V4 Faster?'
+      ];
       
       // Use appropriate headers based on view
       const headers = version === 'combined' ? combinedHeaders : baseHeaders;
@@ -375,6 +470,26 @@ function App() {
                         <TableCell>
                           {versionData?._duration ? `${versionData._duration.toFixed(2)} ms` : 'N/A'}
                         </TableCell>
+                        {version === 'combined' && result.v2?._duration && result.v4?._duration && (
+                          <>
+                            <TableCell 
+                              style={{
+                                backgroundColor: result.v2._duration < result.v4._duration ? 'rgba(0, 200, 0, 0.1)' : 'transparent',
+                                color: result.v2._duration < result.v4._duration ? 'green' : 'inherit'
+                              }}
+                            >
+                              {result.v2._duration < result.v4._duration ? '✓' : ''}
+                            </TableCell>
+                            <TableCell 
+                              style={{
+                                backgroundColor: result.v4._duration < result.v2._duration ? 'rgba(0, 200, 0, 0.1)' : 'transparent',
+                                color: result.v4._duration < result.v2._duration ? 'green' : 'inherit'
+                              }}
+                            >
+                              {result.v4._duration < result.v2._duration ? '✓' : ''}
+                            </TableCell>
+                          </>
+                        )}
                         {version === 'combined' && (
                           <>
                             <TableCell>N/A</TableCell>
@@ -412,6 +527,28 @@ function App() {
                             <TableCell rowSpan={versionData.responses.length}>
                               {versionData?._duration ? `${versionData._duration.toFixed(2)} ms` : 'N/A'}
                             </TableCell>
+                            {version === 'combined' && result.v2?._duration && result.v4?._duration && (
+                              <>
+                                <TableCell 
+                                  rowSpan={versionData.responses.length}
+                                  style={{
+                                    backgroundColor: result.v2._duration < result.v4._duration ? 'rgba(0, 200, 0, 0.1)' : 'transparent',
+                                    color: result.v2._duration < result.v4._duration ? 'green' : 'inherit'
+                                  }}
+                                >
+                                  {result.v2._duration < result.v4._duration ? '✓' : ''}
+                                </TableCell>
+                                <TableCell 
+                                  rowSpan={versionData.responses.length}
+                                  style={{
+                                    backgroundColor: result.v4._duration < result.v2._duration ? 'rgba(0, 200, 0, 0.1)' : 'transparent',
+                                    color: result.v4._duration < result.v2._duration ? 'green' : 'inherit'
+                                  }}
+                                >
+                                  {result.v4._duration < result.v2._duration ? '✓' : ''}
+                                </TableCell>
+                              </>
+                            )}
                             {version === 'combined' && (
                               <>
                                 <TableCell rowSpan={versionData.responses.length}>
