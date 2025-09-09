@@ -200,38 +200,44 @@ function App() {
 
     try {
       const exportData = results.map(result => {
-        // Format V2 SDN data
+        // Get unique SDNs for V2 and V4
         const v2Sdns = result.v2?.responses?.length > 0
           ? result.v2.responses.map(item => ({
               id: item.rulesDetails?.sdnid || 'N/A',
-              name: item.rulesDetails?.sdnname || 'N/A',
-              match: item.nameMatchPercentage || 'N/A',
-              reference: item.rulesDetails?.sanctionReferenceName || 'N/A'
+              name: item.rulesDetails?.sdnname || 'N/A'
             }))
           : [];
 
-        // Format V4 SDN data
         const v4Sdns = result.v4?.responses?.length > 0
           ? result.v4.responses.map(item => ({
               id: item.rulesDetails?.sdnid || 'N/A',
-              name: item.rulesDetails?.sdnname || 'N/A',
-              match: item.nameMatchPercentage || 'N/A',
-              reference: item.rulesDetails?.sanctionReferenceName || 'N/A'
+              name: item.rulesDetails?.sdnname || 'N/A'
             }))
           : [];
 
-        // Format SDN lists for display
+        // Find SDNs only in V2 or only in V4
+        const onlyInV2 = v2Sdns.filter(v2 => 
+          !v4Sdns.some(v4 => v4.id === v2.id)
+        );
+        
+        const onlyInV4 = v4Sdns.filter(v4 => 
+          !v2Sdns.some(v2 => v2.id === v4.id)
+        );
+
+        // Format SDN lists for display (ID - Name only)
         const formatSdns = (sdns) => {
           if (sdns.length === 0) return 'No matches';
-          return sdns.map(s => `ID: ${s.id} - ${s.name} (${s.match}%)`).join('\n');
+          return sdns.map(s => `${s.id} - ${s.name}`).join('\n');
         };
 
         return {
           'Name': result.name,
           'V2 Duration (ms)': result.v2?._duration ? result.v2._duration.toFixed(2) : 'N/A',
           'V2 SDN Matches': formatSdns(v2Sdns),
+          'Only in V2': formatSdns(onlyInV2),
           'V4 Duration (ms)': result.v4?._duration ? result.v4._duration.toFixed(2) : 'N/A',
           'V4 SDN Matches': formatSdns(v4Sdns),
+          'Only in V4': formatSdns(onlyInV4),
           'Total Duration (ms)': result._totalDuration ? result._totalDuration.toFixed(2) : 'N/A'
         };
       });
@@ -244,9 +250,11 @@ function App() {
       const wscols = [
         {wch: 30}, // Name
         {wch: 15}, // V2 Duration
-        {wch: 60}, // V2 SDN Matches
+        {wch: 40}, // V2 SDN Matches
+        {wch: 40}, // Only in V2
         {wch: 15}, // V4 Duration
-        {wch: 60}, // V4 SDN Matches
+        {wch: 40}, // V4 SDN Matches
+        {wch: 40}, // Only in V4
         {wch: 15}  // Total Duration
       ];
       ws['!cols'] = wscols;
@@ -298,13 +306,16 @@ function App() {
     }
 
     const renderTable = (version = 'combined') => {
-      const headers = [
-        '#', 'Name', 'API Version', 'SDN ID', 'SDN Name', 'Match %', 'Duration'
+      // Define base headers
+      const baseHeaders = [
+        '#', 'Name', 'API Version', 'SDN ID', 'SDN Name', 'Duration'
       ];
       
-      if (version === 'combined') {
-        headers.push('Only in V2', 'Only in V4');
-      }
+      // For combined view, add additional columns
+      const combinedHeaders = [...baseHeaders, 'Only in V2', 'Only in V4'];
+      
+      // Use appropriate headers based on view
+      const headers = version === 'combined' ? combinedHeaders : baseHeaders;
 
       const renderSdnDifferences = (sdns) => {
         if (!sdns?.length) return 'N/A';
@@ -359,7 +370,7 @@ function App() {
                         <TableCell>{serialNumber}</TableCell>
                         <TableCell>{result.name}</TableCell>
                         <TableCell>{versionKey.toUpperCase()}</TableCell>
-                        <TableCell colSpan={2}>No matches</TableCell>
+                        <TableCell>No matches</TableCell>
                         <TableCell>N/A</TableCell>
                         <TableCell>
                           {versionData?._duration ? `${versionData._duration.toFixed(2)} ms` : 'N/A'}
@@ -396,11 +407,8 @@ function App() {
                         ) : null}
                         <TableCell>{sdnId}</TableCell>
                         <TableCell>{sdnName}</TableCell>
-                        {i === 0 ? (
+                        {i === 0 && (
                           <>
-                            <TableCell rowSpan={versionData.responses.length}>
-                              {item.nameMatchPercentage || 'N/A'}
-                            </TableCell>
                             <TableCell rowSpan={versionData.responses.length}>
                               {versionData?._duration ? `${versionData._duration.toFixed(2)} ms` : 'N/A'}
                             </TableCell>
@@ -415,7 +423,7 @@ function App() {
                               </>
                             )}
                           </>
-                        ) : null}
+                        )}
                       </TableRow>
                     );
                   });
