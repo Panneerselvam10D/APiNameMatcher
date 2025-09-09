@@ -22,12 +22,14 @@ import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 import apiService from './services/apiService';
+import { Download } from '@mui/icons-material';
 
 function App() {
   const [file, setFile] = useState(null);
   const [results, setResults] = useState([]);
+  const [onlyInResults, setOnlyInResults] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [tabValue, setTabValue] = useState(0);
+  const [activeTab, setActiveTab] = useState('combined');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
   const [initializing, setInitializing] = useState(true);
 
@@ -202,7 +204,8 @@ function App() {
     let currentLength = 0;
     
     for (const sdn of sdns) {
-      const sdnText = `${sdn.id} - ${sdn.name}\n`;
+      // Use Excel-compatible line break (\r\n) and ensure each SDN is on its own line
+      const sdnText = `${sdn.id} - ${sdn.name}\r\n`;
       
       if (currentLength + sdnText.length > MAX_CHUNK_SIZE && currentChunk.length > 0) {
         result.push({
@@ -226,6 +229,76 @@ function App() {
     }
     
     return result;
+  };
+
+  const exportOnlyInToExcel = async () => {
+    if (onlyInResults.length === 0) {
+      showSnackbar('No "Only in V2/V4" data to export', 'warning');
+      return;
+    }
+    
+    try {
+      const loadingSnackbar = showSnackbar('Preparing export...', 'info', 0);
+      
+      // Prepare data for export
+      const exportData = [];
+      let rowIndex = 1; // Start serial number from 1
+      
+      onlyInResults.forEach((result, idx) => {
+        const v2Sdns = result.v2?.responses?.length > 0 ? result.v2.responses : [];
+        const v4Sdns = result.v4?.responses?.length > 0 ? result.v4.responses : [];
+        
+        // Find SDNs only in V2 or only in V4
+        const onlyInV2 = v2Sdns.filter(v2 => 
+          !v4Sdns.some(v4 => v4.rulesDetails?.sdnid === v2.rulesDetails?.sdnid)
+        );
+        
+        const onlyInV4 = v4Sdns.filter(v4 => 
+          !v2Sdns.some(v2 => v2.rulesDetails?.sdnid === v4.rulesDetails?.sdnid)
+        );
+        
+        // Format SDNs for export - one row per SDN
+        const maxRows = Math.max(onlyInV2.length, onlyInV4.length);
+        
+        for (let i = 0; i < maxRows; i++) {
+          const rowData = {
+            'Name': i === 0 ? result.name : '',
+            'Only in V2': onlyInV2[i] ? 
+              `${onlyInV2[i].rulesDetails?.sdnid} - ${onlyInV2[i].rulesDetails?.sdnname}` : '',
+            'Only in V4': onlyInV4[i] ? 
+              `${onlyInV4[i].rulesDetails?.sdnid} - ${onlyInV4[i].rulesDetails?.sdnname}` : ''
+          };
+          
+          exportData.push(rowData);
+        }
+        
+        if (maxRows > 0) {
+          rowIndex++; // Increment serial number for the next name
+        }
+      });
+      
+      // Create worksheet
+      const ws = XLSX.utils.json_to_sheet(exportData);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 30 }, // Name
+        { wch: 60 }, // Only in V2
+        { wch: 60 }  // Only in V4
+      ];
+      
+      // Create workbook and add worksheet
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Only in V2-V4 Results');
+      
+      // Generate and save the Excel file
+      XLSX.writeFile(wb, `only_in_v2_v4_results_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      
+      showSnackbar('Export successful!', 'success');
+    } catch (error) {
+      console.error('Error exporting to Excel:', error);
+      showSnackbar(`Export failed: ${error.message}`, 'error');
+    }
   };
 
   const exportToExcel = async () => {
@@ -341,17 +414,70 @@ function App() {
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Screening Results');
       
-      // Add some styling to header row
+      // Add styling to all cells
       const range = XLSX.utils.decode_range(ws['!ref']);
+      
+      // Style header row
       for (let C = range.s.c; C <= range.e.c; ++C) {
         const cell = ws[XLSX.utils.encode_cell({r: 0, c: C})];
         if (cell) {
           cell.s = { 
             font: { bold: true },
-            fill: { fgColor: { rgb: 'D3D3D3' } }
+            fill: { fgColor: { rgb: 'D3D3D3' } },
+            alignment: { wrapText: true, vertical: 'top' },
+            border: {
+              top: { style: 'thin' },
+              bottom: { style: 'thin' },
+              left: { style: 'thin' },
+              right: { style: 'thin' }
+            }
           };
         }
       }
+      
+      // Style data rows with wrap text and borders
+      for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+        // Set row height to auto
+        if (!ws['!rows']) ws['!rows'] = [];
+        ws['!rows'][R] = { hpx: 'auto', hpt: 'auto' };
+        
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+          const cell = ws[XLSX.utils.encode_cell({r: R, c: C})];
+          if (cell) {
+            // Preserve existing styles if any
+            const existingStyle = cell.s || {};
+            cell.s = {
+              ...existingStyle,
+              alignment: { 
+                wrapText: true, 
+                vertical: 'top',
+                ...(existingStyle.alignment || {})
+              },
+              border: {
+                top: { style: 'thin' },
+                bottom: { style: 'thin' },
+                left: { style: 'thin' },
+                right: { style: 'thin' },
+                ...(existingStyle.border || {})
+              }
+            };
+          }
+        }
+      }
+      
+      // Set explicit column widths for better readability
+      ws['!cols'] = [
+        { wch: 30 }, // Name
+        { wch: 15 }, // V2 Duration
+        { wch: 40 }, // V2 SDN Matches
+        { wch: 40 }, // Only in V2
+        { wch: 15 }, // V4 Duration
+        { wch: 40 }, // V4 SDN Matches
+        { wch: 40 }, // Only in V4
+        { wch: 12 }, // V2 Faster?
+        { wch: 12 }, // V4 Faster?
+        { wch: 18 }  // Total Duration
+      ];
       
       // Generate and save the Excel file
       showSnackbar('Generating Excel file...', 'info', 0, loadingSnackbar);
@@ -379,7 +505,28 @@ function App() {
   };
 
   const handleTabChange = (event, newValue) => {
-    setTabValue(newValue);
+    setActiveTab(newValue);
+    
+    // When switching to only-in tab, prepare the data
+    if (newValue === 'onlyIn') {
+      const onlyInData = results.filter(result => {
+        const v2Sdns = result.v2?.responses?.length > 0 ? result.v2.responses : [];
+        const v4Sdns = result.v4?.responses?.length > 0 ? result.v4.responses : [];
+        
+        // Find SDNs only in V2 or only in V4
+        const onlyInV2 = v2Sdns.filter(v2 => 
+          !v4Sdns.some(v4 => v4.rulesDetails?.sdnid === v2.rulesDetails?.sdnid)
+        );
+        
+        const onlyInV4 = v4Sdns.filter(v4 => 
+          !v2Sdns.some(v2 => v2.rulesDetails?.sdnid === v4.rulesDetails?.sdnid)
+        );
+        
+        return onlyInV2.length > 0 || onlyInV4.length > 0;
+      });
+      
+      setOnlyInResults(onlyInData);
+    }
   };
 
   const renderResults = () => {
@@ -403,10 +550,10 @@ function App() {
       // For combined view, add additional columns
       const combinedHeaders = [
         ...baseHeaders.slice(0, -2), // Remove the last two columns (V2/V4 Faster?)
+        'V2 Faster?', 
+        'V4 Faster?',
         'Only in V2', 
         'Only in V4',
-        'V2 Faster?', 
-        'V4 Faster?'
       ];
       
       // Use appropriate headers based on view
@@ -483,7 +630,7 @@ function App() {
                             <TableCell 
                               style={{
                                 backgroundColor: result.v4._duration < result.v2._duration ? 'rgba(0, 200, 0, 0.1)' : 'transparent',
-                                color: result.v4._duration < result.v2._duration ? 'green' : 'inherit'
+                                color: result.v4._duration < result.v4._duration ? 'green' : 'inherit'
                               }}
                             >
                               {result.v4._duration < result.v2._duration ? '✓' : ''}
@@ -589,20 +736,97 @@ function App() {
     return (
       <Box sx={{ mt: 3 }}>
         <Tabs 
-          value={tabValue} 
-          onChange={handleTabChange} 
+          value={activeTab}
+          onChange={handleTabChange}
           indicatorColor="primary"
           textColor="primary"
-          centered
+          variant="fullWidth"
+          aria-label="results tabs"
         >
-          <Tab label="Combined View" />
-          <Tab label="V2 Results" />
-          <Tab label="V4 Results" />
+          <Tab value="combined" label="Combined Results" />
+          <Tab 
+            value="onlyIn" 
+            label="Only in V2/V4" 
+            disabled={results.length === 0}
+          />
         </Tabs>
         
-        {tabValue === 0 && renderTable('combined')}
-        {tabValue === 1 && renderTable('v2')}
-        {tabValue === 2 && renderTable('v4')}
+        {activeTab === 'combined' && renderTable('combined')}
+        {activeTab === 'onlyIn' && (
+          <TableContainer component={Paper} sx={{ mt: 2, maxHeight: '70vh', overflow: 'auto' }}>
+            <Table stickyHeader>
+              <TableHead>
+                <TableRow>
+                  <TableCell style={{ fontWeight: 'bold', width: '80px' }}>S.No.</TableCell>
+                  <TableCell style={{ fontWeight: 'bold' }}>Name</TableCell>
+                  <TableCell style={{ fontWeight: 'bold' }}>Only in V2</TableCell>
+                  <TableCell style={{ fontWeight: 'bold' }}>Only in V4</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {onlyInResults.map((result, idx) => {
+                  const serialNumber = idx + 1;
+                  
+                  if (result.error) {
+                    return (
+                      <TableRow key={`error-${idx}`} style={{ backgroundColor: '#ffebee' }}>
+                        <TableCell>{serialNumber}</TableCell>
+                        <TableCell colSpan={2} align="center">
+                          <Typography color="error">
+                            {result.name}: {result.error}
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  }
+
+                  const v2Sdns = result.v2?.responses?.length > 0 ? result.v2.responses : [];
+                  const v4Sdns = result.v4?.responses?.length > 0 ? result.v4.responses : [];
+
+                  // Find SDNs only in V2 or only in V4
+                  const onlyInV2 = v2Sdns.filter(v2 => 
+                    !v4Sdns.some(v4 => v4.rulesDetails?.sdnid === v2.rulesDetails?.sdnid)
+                  );
+                  
+                  const onlyInV4 = v4Sdns.filter(v4 => 
+                    !v2Sdns.some(v2 => v2.rulesDetails?.sdnid === v4.rulesDetails?.sdnid)
+                  );
+
+                  return (
+                    <TableRow key={idx}>
+                      <TableCell>{idx + 1}</TableCell>
+                      <TableCell>{result.name}</TableCell>
+                      <TableCell>
+                        {onlyInV2.map((sdn, i) => {
+                          const sdnId = sdn.rulesDetails?.sdnid || 'N/A';
+                          const sdnName = sdn.rulesDetails?.sdnname || 'N/A';
+                          return (
+                            <div key={`sdn-v2-${i}`} style={{ marginBottom: '4px' }}>
+                              <strong>{i + 1}. {sdnId}</strong>: {sdnName}
+                            </div>
+                          );
+                        })}
+                        {onlyInV2.length === 0 && <div>-</div>}
+                      </TableCell>
+                      <TableCell>
+                        {onlyInV4.map((sdn, i) => {
+                          const sdnId = sdn.rulesDetails?.sdnid || 'N/A';
+                          const sdnName = sdn.rulesDetails?.sdnname || 'N/A';
+                          return (
+                            <div key={`sdn-v4-${i}`} style={{ marginBottom: '4px' }}>
+                              <strong>{i + 1}. {sdnId}</strong>: {sdnName}
+                            </div>
+                          );
+                        })}
+                        {onlyInV4.length === 0 && <div>-</div>}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
       </Box>
     );
   };
@@ -648,13 +872,27 @@ function App() {
           >
             {loading ? 'Processing...' : 'Process'}
           </Button>
-          <Button
-            variant="outlined"
-            onClick={exportToExcel}
-            disabled={results.length === 0 || loading}
-          >
-            Export to Excel
-          </Button>
+          <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
+            <Button
+              variant="contained"
+              color="primary"
+              onClick={exportToExcel}
+              disabled={results.length === 0}
+              startIcon={<Download />}
+            >
+              Export All to Excel
+            </Button>
+            
+            <Button
+              variant="outlined"
+              color="primary"
+              onClick={exportOnlyInToExcel}
+              disabled={onlyInResults.length === 0}
+              startIcon={<Download />}
+            >
+              Export Only in V2/V4
+            </Button>
+          </Box>
         </Box>
       )}
       
