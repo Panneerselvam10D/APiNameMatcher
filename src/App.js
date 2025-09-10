@@ -261,12 +261,19 @@ function App() {
         const maxRows = Math.max(onlyInV2.length, onlyInV4.length);
         
         for (let i = 0; i < maxRows; i++) {
+          const v2Sdn = onlyInV2[i]?.rulesDetails;
+          const v4Sdn = onlyInV4[i]?.rulesDetails;
+          
+          const v2Text = v2Sdn ? 
+            `${v2Sdn.sdnid || 'N/A'} - ${v2Sdn.sdnname || 'N/A'}` : '';
+          
+          const v4Text = v4Sdn ? 
+            `${v4Sdn.sdnid || 'N/A'} - ${v4Sdn.sdnname || 'N/A'}` : '';
+          
           const rowData = {
             'Name': i === 0 ? result.name : '',
-            'Only in V2': onlyInV2[i] ? 
-              `${onlyInV2[i].rulesDetails?.sdnid} - ${onlyInV2[i].rulesDetails?.sdnname}` : '',
-            'Only in V4': onlyInV4[i] ? 
-              `${onlyInV4[i].rulesDetails?.sdnid} - ${onlyInV4[i].rulesDetails?.sdnname}` : ''
+            'Only in V2': v2Text,
+            'Only in V4': v4Text
           };
           
           exportData.push(rowData);

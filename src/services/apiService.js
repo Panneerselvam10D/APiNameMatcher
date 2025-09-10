@@ -1,14 +1,23 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://screeningdevv2.ap.loclx.io';
+// Load environment variables
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || '';
 
-// Keycloak configuration
+// Keycloak configuration from environment variables
 const KEYCLOAK_CONFIG = {
-  url: 'https://keycloak-auth.inside10d.com',
-  realm: 'ScreeningApp',
-  clientId: 'screening-client',
-  username: 'superuser',
-  password: 'superuser'
+  url: process.env.REACT_APP_KEYCLOAK_URL || '',
+  realm: process.env.REACT_APP_KEYCLOAK_REALM || 'ScreeningApp',
+  clientId: process.env.REACT_APP_KEYCLOAK_CLIENT_ID || 'screening-client',
+  username: process.env.REACT_APP_KEYCLOAK_USERNAME || 'superuser',
+  password: process.env.REACT_APP_KEYCLOAK_PASSWORD || 'superuser'
+};
+
+
+// API endpoints configuration
+const API_BASE_PATH = '/namecheck/rule-matching/';
+const API_ENDPOINTS = {
+  v1_2: `${API_BASE_PATH}${process.env.REACT_APP_API_ENDPOINT_API_1 || 'v1.2'}`,
+  v2: `${API_BASE_PATH}${process.env.REACT_APP_API_ENDPOINT_API_2 || 'v2'}`
 };
 
 // Create axios instance with default config
@@ -132,11 +141,11 @@ const apiService = {
 
       // Call both APIs with timing
       const v2Start = performance.now();
-      v2Response = await api.post('/namecheck/rule-matching/v2', payload);
+      v2Response = await api.post(API_ENDPOINTS.v1_2, payload);
       v2Time = performance.now() - v2Start;
 
       const v4Start = performance.now();
-      v4Response = await api.post('/namecheck/rule-matching/v4', payload);
+      v4Response = await api.post(API_ENDPOINTS.v2, payload);
       v4Time = performance.now() - v4Start;
 
       return {
@@ -181,3 +190,8 @@ const apiService = {
 };
 
 export default apiService;
+
+
+
+
+
