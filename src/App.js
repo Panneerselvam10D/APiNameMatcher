@@ -23,6 +23,7 @@ import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 import apiService from './services/apiService';
 import { Download } from '@mui/icons-material';
+import { formatDateForApi } from './utils/dateUtils';
 
 function App() {
   const [file, setFile] = useState(null);
@@ -69,13 +70,44 @@ function App() {
 
     try {
       const data = await readExcel(file);
-      const names = extractNames(data);
+      const entityGroups = extractEntityGroups(data);
       
-      // Process each name and update results in real-time
-      for (let i = 0; i < names.length; i++) {
-        const name = names[i];
+      if (entityGroups.length === 0) {
+        throw new Error('No valid entity data found in the file');
+      }
+      
+      showSnackbar(`Found ${entityGroups.length} entities to process`, 'info');
+      
+      // Process each entity group
+      for (const [index, group] of entityGroups.entries()) {
+        const { entityData, personData } = group;
+        const entityName = entityData.fullname || `Entity ${index + 1}`;
+        
         try {
-          const result = await apiService.processName(name);
+          // Show progress
+          showSnackbar(`Processing ${entityName} (${index + 1}/${entityGroups.length})...`, 'info');
+          
+          // Process the entity with its associated persons
+          const result = await apiService.processName(
+            entityData.fullname,
+            personData.map(person => ({
+              ...person,
+              date: formatDateForApi(person.date)
+            })),
+            {
+              fullName: entityData.fullname,
+              date: formatDateForApi(entityData.date),
+              year: entityData.year,
+              idNumber: entityData.idnumber,
+              nationality: entityData.nationality,
+              channelName: entityData.channelname,
+              type: entityData.type,
+              contact: entityData.contact,
+              accountNo: entityData.accountno,
+              customerType: entityData.customertype,
+              transactionType: entityData.transactiontype
+            }
+          );
           
           // Compare SDN data between V2 and V4
           const sdnComparison = compareSdnData(result.v2, result.v4);
@@ -84,37 +116,44 @@ function App() {
           setResults(prevResults => [
             ...prevResults,
             {
-              name,
+              name: entityName,
               v2: result.v2,
               v4: result.v4,
               _totalDuration: result._totalDuration,
               _sdnComparison: sdnComparison,
-              id: `${name}-${Date.now()}-${i}` // Add a unique ID for each result
+              id: `${entityName}-${Date.now()}-${index}`,
+              entityData: entityData,
+              personData: personData
             }
           ]);
           
-          // Show a snackbar for the first few results or on completion
-          if (i === 0) {
-            showSnackbar('Processing started. Results will appear below as they are ready.', 'info');
-          }
         } catch (error) {
-          console.error(`Error processing name: ${name}`, error);
+          console.error(`Error processing entity ${entityName}:`, error);
+          
           // Add a failed entry to results
           setResults(prevResults => [
             ...prevResults,
             {
-              name,
+              name: entityName,
               error: `Error: ${error.message}`,
-              id: `${name}-error-${Date.now()}-${i}`
+              id: `error-${Date.now()}-${index}`,
+              entityData: entityData,
+              personData: personData
             }
           ]);
+          
+          showSnackbar(`Error processing ${entityName}: ${error.message}`, 'error');
         }
+        
+        // Small delay between API calls to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
       
-      showSnackbar('All names processed!', 'success');
+      showSnackbar(`Successfully processed ${entityGroups.length} entities`, 'success');
+      
     } catch (error) {
       console.error('Error processing file:', error);
-      showSnackbar('Failed to process file. Please try again.', 'error');
+      showSnackbar(`Failed to process file: ${error.message}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -138,8 +177,86 @@ function App() {
     });
   };
 
-  const extractNames = (data) => {
-    return data.slice(1).map(row => row[0]).filter(Boolean);
+  const extractEntityGroups = (data) => {
+    if (data.length < 2) return [];
+    
+    const headers = data[0].map(h => h?.toString().toLowerCase().trim());
+    const entityGroups = [];
+    let currentEntity = null;
+    
+    // Start from row 1 (after header)
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      
+      // Skip completely empty rows
+      if (!row || row.every(cell => !cell)) continue;
+      
+      // Check if this is an entity row (has required entity fields)
+      const entityFields = {};
+      let hasRequiredFields = true;
+      const requiredEntityFields = [
+        'fullname', 'channelname', 'type', 'customertype', 'transactiontype'
+      ];
+      
+      // Check if this row has all required entity fields
+      for (const field of requiredEntityFields) {
+        const fieldIndex = headers.indexOf(field);
+        if (fieldIndex === -1 || !row[fieldIndex]) {
+          hasRequiredFields = false;
+          break;
+        }
+        entityFields[field] = row[fieldIndex]?.toString().trim() || '';
+      }
+      
+      if (hasRequiredFields) {
+        // Save previous entity if exists
+        if (currentEntity) {
+          entityGroups.push({...currentEntity});
+        }
+        
+        // Start new entity
+        currentEntity = {
+          entityData: {},
+          personData: []
+        };
+        
+        // Extract all entity fields
+        headers.forEach((header, index) => {
+          if (header && row[index] !== undefined) {
+            currentEntity.entityData[header] = row[index]?.toString().trim() || '';
+          }
+        });
+      } else if (currentEntity) {
+        // This is a person row for the current entity
+        const person = {};
+        headers.forEach((header, index) => {
+          if (header && row[index] !== undefined) {
+            person[header] = row[index]?.toString().trim() || '';
+          }
+        });
+        
+        // Only add if we have required person fields
+        if (person.fullname && person.role) {
+          currentEntity.personData.push({
+            fullName: person.fullname,
+            date: person.date || '',
+            year: person.year || '',
+            idNumber: person.idnumber || '',
+            contact: person.contact || '',
+            role: person.role,
+            accountNo: person.accountno || '',
+            nationality: person.nationality || ''
+          });
+        }
+      }
+    }
+    
+    // Add the last entity if exists
+    if (currentEntity) {
+      entityGroups.push(currentEntity);
+    }
+    
+    return entityGroups;
   };
 
   // Helper function to compare SDN data between V2 and V4

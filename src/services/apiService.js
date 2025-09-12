@@ -114,28 +114,43 @@ api.interceptors.response.use(
 
 const apiService = {
   // Process a single name through both APIs
-  processName: async (name) => {
+  processName: async (name, personData = [], entityData = {}) => {
     const startTime = performance.now();
     let v2Response, v4Response;
     let v2Time = 0;
     let v4Time = 0;
     
     try {
+      // Construct person match requests from personData array
+      const personMatchRequests = personData.map(person => ({
+        fullName: person.fullName || "",
+        date: person.date || "",
+        year: person.year || "",
+        idNumber: person.idNumber || "",
+        contact: person.contact || "",
+        role: person.role || "", // Mandatory field
+        accountNo: person.accountNo || "",
+        nationality: person.nationality || "",
+        type: "Person" // Mandatory field
+      }));
+
+      // Construct the main payload with entity data and person matches
       const payload = {
         matchingRequestDto: [{
-          fullName: name,
-          date: "",
-          year: "",
-          idNumber: "",
-          nationality: "",
-          channelName: "internal",
-          contact: "",
-          accountNo: "",
-          customerType: "",
-          type: "Person",
-          transactionType: "",
+          fullName: entityData.fullName || name, // Fallback to name if entityData.fullName not provided
+          date: entityData.date || "",
+          year: entityData.year || "",
+          idNumber: entityData.idNumber || "",
+          nationality: entityData.nationality || "",
+          channelName: entityData.channelName || "", // Mandatory field
+          type: entityData.type || "Entity", // Mandatory field, default to Entity
+          contact: entityData.contact || "",
+          accountNo: entityData.accountNo || "",
+          customerType: entityData.customerType || "", // Mandatory field
+          transactionType: entityData.transactionType || "", // Mandatory field
           flag: false,
-          limitFlag: 10000
+          limitFlag: 10000,
+          personMatchRequests: personMatchRequests
         }]
       };
 
