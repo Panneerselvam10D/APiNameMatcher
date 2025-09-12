@@ -11,18 +11,30 @@ import {
   TableHead, 
   TableRow,
   Typography,
-  Snackbar,
-  Alert,
   Box,
   Tabs,
-  Tab
+  Tab,
+  Chip
 } from '@mui/material';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import * as XLSX from 'xlsx';
-import { saveAs } from 'file-saver';
 import apiService from './services/apiService';
-import { Download } from '@mui/icons-material';
+import { Download, Settings } from '@mui/icons-material';
+import { TextField, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Tooltip, Divider } from '@mui/material';
+import axios from 'axios';
+
+// Default configuration
+const DEFAULT_CONFIG = {
+  apiBaseUrl: 'https://screeningdevv2.ap.loclx.io',
+  keycloakUrl: 'https://keycloak-auth.inside10d.com',
+  keycloakRealm: 'ScreeningApp',
+  keycloakClientId: 'screening-client',
+  keycloakUsername: 'superuser',
+  keycloakPassword: 'superuser',
+  apiEndpointV1: 'v1.2',
+  apiEndpointV2: 'v2'
+};
 
 function App() {
   const [file, setFile] = useState(null);
@@ -31,23 +43,70 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('combined');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [config, setConfig] = useState(() => {
+    // Load saved config from localStorage or use defaults
+    const savedConfig = localStorage.getItem('appConfig');
+    return savedConfig ? JSON.parse(savedConfig) : DEFAULT_CONFIG;
+  });
   const [initializing, setInitializing] = useState(true);
+
+  // Save config to localStorage when it changes
+  useEffect(() => {
+    localStorage.setItem('appConfig', JSON.stringify(config));
+    // Update API service with new config
+    apiService.updateConfig({
+      apiBaseUrl: config.apiBaseUrl,
+      keycloakConfig: {
+        url: config.keycloakUrl,
+        realm: config.keycloakRealm,
+        clientId: config.keycloakClientId,
+        username: config.keycloakUsername,
+        password: config.keycloakPassword
+      },
+      apiEndpoints: {
+        v1_2: config.apiEndpointV1,
+        v2: config.apiEndpointV2
+      }
+    });
+  }, [config]);
 
   useEffect(() => {
     // Initialize by getting the first access token
     const initializeAuth = async () => {
       try {
-        await apiService.getAccessToken();
+        console.log('Initializing authentication...');
+        const token = await apiService.getAccessToken();
+        console.log('Successfully obtained access token');
         setInitializing(false);
       } catch (error) {
-        console.error('Authentication failed:', error);
-        showSnackbar('Failed to authenticate with the server', 'error');
+        console.error('Initialization error:', error);
+        let errorMessage = error.message || 'Failed to initialize authentication';
+        
+        // Extract more detailed error message if available
+        if (error.originalError?.response?.data?.error_description) {
+          errorMessage = error.originalError.response.data.error_description;
+        } else if (error.originalError?.message) {
+          errorMessage = error.originalError.message;
+        }
+        
+        setSnackbar({
+          open: true,
+          message: `Authentication Error: ${errorMessage}`,
+          severity: 'error'
+        });
+        
+        // Open settings if this is the first initialization
+        if (initializing) {
+          setSettingsOpen(true);
+        }
+        
         setInitializing(false);
       }
     };
 
     initializeAuth();
-  }, []);
+  }, [initializing]);
 
   const handleFileChange = (e) => {
     setFile(e.target.files[0]);
@@ -77,8 +136,8 @@ function App() {
         try {
           const result = await apiService.processName(name);
           
-          // Compare SDN data between V2 and V4
-          const sdnComparison = compareSdnData(result.v2, result.v4);
+          // Compare SDN data between V2, V4, and Univius
+          const sdnComparison = compareSdnData(result.v2, result.v4, result.univius);
           
           // Update results with the new data
           setResults(prevResults => [
@@ -87,6 +146,7 @@ function App() {
               name,
               v2: result.v2,
               v4: result.v4,
+              univius: result.univius,
               _totalDuration: result._totalDuration,
               _sdnComparison: sdnComparison,
               id: `${name}-${Date.now()}-${i}` // Add a unique ID for each result
@@ -142,9 +202,20 @@ function App() {
     return data.slice(1).map(row => row[0]).filter(Boolean);
   };
 
-  // Helper function to compare SDN data between V2 and V4
-  const compareSdnData = (v2Data, v4Data) => {
-    // Extract unique SDN IDs from V2 and V4
+  // Helper function to extract SDNs from univius API response
+  const extractUniviusSdns = (univiusData) => {
+    if (!univiusData || !Array.isArray(univiusData)) return [];
+    
+    return univiusData.map(item => ({
+      id: item.sdnId || 'N/A',
+      name: item.sdnName || 'N/A',
+      reference: item.listName || ''
+    }));
+  };
+
+  // Helper function to compare SDN data between V2, V4, and Univius
+  const compareSdnData = (v2Data, v4Data, univiusData) => {
+    // Extract unique SDN IDs from V2, V4, and Univius
     const v2Sdns = new Set(
       (v2Data?.responses || [])
         .flatMap(item => item.rulesDetails?.sdnid || [])
@@ -156,14 +227,25 @@ function App() {
         .flatMap(item => item.rulesDetails?.sdnid || [])
         .filter(Boolean)
     );
+    
+    const univiusSdns = new Set(
+      (Array.isArray(univiusData) ? univiusData : [])
+        .map(item => item.sdnId)
+        .filter(Boolean)
+    );
 
-    // Find SDNs in V2 but not in V4
+    // Helper function to find SDN info in V2/V4 responses
+    const findSdnInfo = (data, sdnId) => {
+      return (data?.responses || [])
+        .flatMap(item => item.rulesDetails || [])
+        .find(rule => rule.sdnid === sdnId);
+    };
+
+    // Find SDNs in V2 but not in V4 or Univius
     const onlyInV2 = [];
     v2Sdns.forEach(sdnId => {
-      if (!v4Sdns.has(sdnId)) {
-        const sdnInfo = (v2Data?.responses || [])
-          .flatMap(item => item.rulesDetails || [])
-          .find(rule => rule.sdnid === sdnId);
+      if (!v4Sdns.has(sdnId) && !univiusSdns.has(sdnId)) {
+        const sdnInfo = findSdnInfo(v2Data, sdnId);
         if (sdnInfo) {
           onlyInV2.push({
             id: sdnId,
@@ -174,13 +256,11 @@ function App() {
       }
     });
 
-    // Find SDNs in V4 but not in V2
+    // Find SDNs in V4 but not in V2 or Univius
     const onlyInV4 = [];
     v4Sdns.forEach(sdnId => {
-      if (!v2Sdns.has(sdnId)) {
-        const sdnInfo = (v4Data?.responses || [])
-          .flatMap(item => item.rulesDetails || [])
-          .find(rule => rule.sdnid === sdnId);
+      if (!v2Sdns.has(sdnId) && !univiusSdns.has(sdnId)) {
+        const sdnInfo = findSdnInfo(v4Data, sdnId);
         if (sdnInfo) {
           onlyInV4.push({
             id: sdnId,
@@ -190,8 +270,23 @@ function App() {
         }
       }
     });
+    
+    // Find SDNs in Univius but not in V2 or V4
+    const onlyInUnivius = [];
+    univiusSdns.forEach(sdnId => {
+      if (!v2Sdns.has(sdnId) && !v4Sdns.has(sdnId)) {
+        const sdnInfo = (Array.isArray(univiusData) ? univiusData : []).find(item => item.sdnId === sdnId);
+        if (sdnInfo) {
+          onlyInUnivius.push({
+            id: sdnId,
+            name: sdnInfo.sdnName || 'N/A',
+            reference: sdnInfo.listName || ''
+          });
+        }
+      }
+    });
 
-    return { onlyInV2, onlyInV4 };
+    return { onlyInV2, onlyInV4, onlyInUnivius };
   };
 
   // Helper function to split SDN list into chunks that fit within Excel's cell limit
@@ -327,7 +422,7 @@ function App() {
         
         // Process chunk
         for (const result of chunk) {
-          // Get unique SDNs for V2 and V4
+          // Get unique SDNs for V2, V4, and Univius
           const v2Sdns = result.v2?.responses?.length > 0
             ? result.v2.responses.map(item => ({
                 id: item.rulesDetails?.sdnid || 'N/A',
@@ -341,14 +436,29 @@ function App() {
                 name: item.rulesDetails?.sdnname || 'N/A'
               }))
             : [];
+            
+          const univiusSdns = Array.isArray(result.univius)
+            ? result.univius.map(item => ({
+                id: item.sdnId || 'N/A',
+                name: item.sdnName || 'N/A',
+                reference: item.listName || ''
+              }))
+            : [];
 
-          // Find SDNs only in V2 or only in V4
+          // Find SDNs only in each API
           const onlyInV2 = v2Sdns.filter(v2 => 
-            !v4Sdns.some(v4 => v4.id === v2.id)
+            !v4Sdns.some(v4 => v4.id === v2.id) &&
+            !univiusSdns.some(u => u.id === v2.id)
           );
           
           const onlyInV4 = v4Sdns.filter(v4 => 
-            !v2Sdns.some(v2 => v2.id === v4.id)
+            !v2Sdns.some(v2 => v2.id === v4.id) &&
+            !univiusSdns.some(u => u.id === v4.id)
+          );
+          
+          const onlyInUnivius = univiusSdns.filter(u => 
+            !v2Sdns.some(v2 => v2.id === u.id) &&
+            !v4Sdns.some(v4 => v4.id === u.id)
           );
 
           // Split SDN lists into chunks that fit within Excel's cell limit
@@ -356,12 +466,18 @@ function App() {
           const onlyV2Chunks = splitSdnsForExport(onlyInV2);
           const v4Chunks = splitSdnsForExport(v4Sdns);
           const onlyV4Chunks = splitSdnsForExport(onlyInV4);
+          const univiusChunks = splitSdnsForExport(univiusSdns);
+          const onlyUniviusChunks = splitSdnsForExport(onlyInUnivius);
           
           // Calculate which version is faster
-          const v2Faster = result.v2?._duration && result.v4?._duration && 
-                          result.v2._duration < result.v4._duration;
-          const v4Faster = result.v2?._duration && result.v4?._duration && 
-                          result.v4._duration < result.v2._duration;
+          const durations = {
+            v2: result.v2?._duration || 0,
+            v4: result.v4?._duration || 0,
+            univius: result.univius?._duration || 0
+          };
+          
+          const fastestApi = Object.entries(durations).reduce((a, b) => 
+            a[1] > 0 && (a[1] < b[1] || b[1] === 0) ? a : b, ['', Infinity])[0];
           
           // Determine how many rows we'll need for this result
           const maxChunks = Math.max(
@@ -369,6 +485,8 @@ function App() {
             onlyV2Chunks.length,
             v4Chunks.length,
             onlyV4Chunks.length,
+            univiusChunks.length,
+            onlyUniviusChunks.length,
             1 // At least one row
           );
           
@@ -377,14 +495,28 @@ function App() {
             const isFirstRow = i === 0;
             const rowData = {
               'Name': isFirstRow ? result.name : `(cont.) ${result.name}`,
-              'V2 Duration (ms)': isFirstRow ? (result.v2?._duration ? result.v2._duration.toFixed(2) : 'N/A') : '',
+              
+              // V2 Data
+              'V2 Duration (ms)': isFirstRow ? (durations.v2 ? durations.v2.toFixed(2) : 'N/A') : '',
               'V2 SDN Matches': v2Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
               'Only in V2': onlyV2Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
-              'V4 Duration (ms)': isFirstRow ? (result.v4?._duration ? result.v4._duration.toFixed(2) : 'N/A') : '',
+              
+              // V4 Data
+              'V4 Duration (ms)': isFirstRow ? (durations.v4 ? durations.v4.toFixed(2) : 'N/A') : '',
               'V4 SDN Matches': v4Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
               'Only in V4': onlyV4Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
-              'V2 Faster?': isFirstRow ? (v2Faster ? '✓' : '') : '',
-              'V4 Faster?': isFirstRow ? (v4Faster ? '✓' : '') : '',
+              
+              // Univius Data
+              'Univius Duration (ms)': isFirstRow ? (durations.univius ? durations.univius.toFixed(2) : 'N/A') : '',
+              'Univius SDN Matches': univiusChunks[i]?.content || (isFirstRow ? 'No matches' : ''),
+              'Only in Univius': onlyUniviusChunks[i]?.content || (isFirstRow ? 'No matches' : ''),
+              
+              // Comparison
+              'Fastest API': isFirstRow ? 
+                (fastestApi === 'v2' ? 'V2' : 
+                 fastestApi === 'v4' ? 'V4' : 
+                 fastestApi === 'univius' ? 'Univius' : 'N/A') : '',
+              
               'Total Duration (ms)': isFirstRow ? (result._totalDuration ? result._totalDuration.toFixed(2) : 'N/A') : ''
             };
             
@@ -403,17 +535,27 @@ function App() {
       // Create worksheet
       const ws = XLSX.utils.json_to_sheet(exportData);
       
-      // Set column widths
+      // Set initial column widths
       ws['!cols'] = [
         {wch: 30}, // Name
+        
+        // V2 Columns
         {wch: 15}, // V2 Duration
         {wch: 40}, // V2 SDN Matches
         {wch: 40}, // Only in V2
+        
+        // V4 Columns
         {wch: 15}, // V4 Duration
         {wch: 40}, // V4 SDN Matches
         {wch: 40}, // Only in V4
-        {wch: 10}, // V2 Faster?
-        {wch: 10}, // V4 Faster?
+        
+        // Univius Columns
+        {wch: 15}, // Univius Duration
+        {wch: 40}, // Univius SDN Matches
+        {wch: 40}, // Only in Univius
+        
+        // Comparison Columns
+        {wch: 15}, // Fastest API
         {wch: 15}  // Total Duration
       ];
       
@@ -431,7 +573,11 @@ function App() {
           cell.s = { 
             font: { bold: true },
             fill: { fgColor: { rgb: 'D3D3D3' } },
-            alignment: { wrapText: true, vertical: 'top' },
+            alignment: { 
+              wrapText: true, 
+              vertical: 'top',
+              horizontal: 'center'
+            },
             border: {
               top: { style: 'thin' },
               bottom: { style: 'thin' },
@@ -475,16 +621,51 @@ function App() {
       // Set explicit column widths for better readability
       ws['!cols'] = [
         { wch: 30 }, // Name
-        { wch: 15 }, // V2 Duration
-        { wch: 40 }, // V2 SDN Matches
-        { wch: 40 }, // Only in V2
-        { wch: 15 }, // V4 Duration
-        { wch: 40 }, // V4 SDN Matches
-        { wch: 40 }, // Only in V4
-        { wch: 12 }, // V2 Faster?
-        { wch: 12 }, // V4 Faster?
-        { wch: 18 }  // Total Duration
+        
+        // V2 Columns
+        { wch: 15 },  // V2 Duration
+        { wch: 50 },  // V2 SDN Matches
+        { wch: 50 },  // Only in V2
+        
+        // V4 Columns
+        { wch: 15 },  // V4 Duration
+        { wch: 50 },  // V4 SDN Matches
+        { wch: 50 },  // Only in V4
+        
+        // Univius Columns
+        { wch: 15 },  // Univius Duration
+        { wch: 50 },  // Univius SDN Matches
+        { wch: 50 },  // Only in Univius
+        
+        // Comparison Columns
+        { wch: 15 },  // Fastest API
+        { wch: 18 }   // Total Duration
       ];
+      
+      // Add some visual separation between API sections
+      const headerRow = ws[XLSX.utils.encode_cell({r: 0, c: 0})];
+      if (headerRow) {
+        headerRow.s = {
+          ...headerRow.s,
+          fill: { fgColor: { rgb: 'E6E6E6' } },
+          font: { bold: true, color: { rgb: '333333' } }
+        };
+      }
+      
+      // Style the duration columns for better readability
+      const durationColumns = [1, 4, 7]; // Indices of duration columns
+      for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+        durationColumns.forEach(col => {
+          const cell = ws[XLSX.utils.encode_cell({r: R, c: col})];
+          if (cell) {
+            cell.s = {
+              ...cell.s,
+              numFmt: '0.00',
+              alignment: { ...(cell.s?.alignment || {}), horizontal: 'right' }
+            };
+          }
+        });
+      }
       
       // Generate and save the Excel file
       showSnackbar('Generating Excel file...', 'info', 0, loadingSnackbar);
@@ -534,6 +715,65 @@ function App() {
       
       setOnlyInResults(onlyInData);
     }
+  };
+
+  // Helper function to render SDN list
+  const renderSdnList = (sdns, isUnivius = false) => {
+    if (!sdns || sdns.length === 0) {
+      return <Typography color="textSecondary">No matches</Typography>;
+    }
+
+    return (
+      <Box sx={{ maxHeight: '200px', overflowY: 'auto' }}>
+        {sdns.map((sdn, index) => (
+          <Box key={index} sx={{ mb: 1, p: 1, bgcolor: 'background.paper', borderRadius: 1 }}>
+            <Typography variant="body2">
+              <strong>ID:</strong> {sdn.id}<br />
+              <strong>Name:</strong> {sdn.name}<br />
+              {sdn.reference && (
+                <>
+                  <strong>Reference:</strong> {sdn.reference}
+                </>
+              )}
+            </Typography>
+          </Box>
+        ))}
+      </Box>
+    );
+  };
+
+  // Helper function to render API result card
+  const renderApiResultCard = (title, data, durationKey, isLoading = false) => {
+    if (isLoading) {
+      return (
+        <Paper sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <Typography variant="h6" gutterBottom>{title}</Typography>
+          <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flex: 1 }}>
+            <CircularProgress size={24} />
+          </Box>
+        </Paper>
+      );
+    }
+
+    const duration = data?.[durationKey];
+    const sdns = Array.isArray(data) ? data : [];
+    
+    return (
+      <Paper sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Typography variant="h6">{title}</Typography>
+          {duration && (
+            <Chip 
+              label={`${duration.toFixed(2)} ms`} 
+              color="primary" 
+              size="small"
+              sx={{ fontWeight: 'bold' }}
+            />
+          )}
+        </Box>
+        {renderSdnList(sdns, title === 'Univius')}
+      </Paper>
+    );
   };
 
   const renderResults = () => {
@@ -838,17 +1078,113 @@ function App() {
     );
   };
 
+  const handleSettingsOpen = () => setSettingsOpen(true);
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState(null);
+
+  const handleSettingsClose = () => {
+    setSettingsOpen(false);
+    setConnectionStatus(null);
+  };
+
+  const handleConfigChange = (field, value) => {
+    setConfig(prev => ({
+      ...prev,
+      [field]: value
+    }));
+    setConnectionStatus(null); // Reset status when config changes
+  };
+
+  const testKeycloakConnection = async () => {
+    setIsTestingConnection(true);
+    setConnectionStatus(null);
+    
+    try {
+      // Create a temporary config with current form values
+      const tempConfig = {
+        ...config,
+        keycloakConfig: {
+          url: config.keycloakUrl,
+          realm: config.keycloakRealm,
+          clientId: config.keycloakClientId,
+          username: config.keycloakUsername,
+          password: config.keycloakPassword
+        }
+      };
+      
+      // Test the connection
+      const testApi = axios.create({
+        baseURL: config.apiBaseUrl,
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        timeout: 10000 // 10 second timeout for testing
+      });
+      
+      const params = new URLSearchParams();
+      params.append('client_id', tempConfig.keycloakConfig.clientId);
+      params.append('username', tempConfig.keycloakConfig.username);
+      params.append('password', tempConfig.keycloakConfig.password);
+      params.append('grant_type', 'password');
+      
+      const tokenUrl = `${tempConfig.keycloakConfig.url}/realms/${tempConfig.keycloakConfig.realm}/protocol/openid-connect/token`;
+      
+      const response = await testApi.post(tokenUrl, params);
+      
+      if (response.data?.access_token) {
+        setConnectionStatus({ type: 'success', message: 'Successfully connected to Keycloak!' });
+      } else {
+        setConnectionStatus({ type: 'error', message: 'Connection successful but no token received' });
+      }
+    } catch (error) {
+      console.error('Connection test failed:', error);
+      let message = error.message;
+      
+      if (error.response) {
+        if (error.response.status === 401) {
+          message = 'Invalid credentials';
+        } else if (error.response.status === 404) {
+          message = 'Keycloak endpoint not found. Check the URL and realm.';
+        } else {
+          message = `Server error: ${error.response.status} ${error.response.statusText}`;
+        }
+      } else if (error.code === 'ECONNABORTED') {
+        message = 'Connection timed out. Check the server URL and your network connection.';
+      } else if (error.request) {
+        message = 'No response from server. Check the URL and ensure the server is running.';
+      }
+      
+      setConnectionStatus({ type: 'error', message });
+    } finally {
+      setIsTestingConnection(false);
+    }
+  };
+
+  const handleResetSettings = () => {
+    if (window.confirm('Are you sure you want to reset all settings to default?')) {
+      setConfig(DEFAULT_CONFIG);
+    }
+  };
+
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
-      <Typography variant="h4" component="h1" gutterBottom>
-        API Name Matcher
-      </Typography>
-      
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+        <Typography variant="h4" component="h1" gutterBottom>
+          API Matcher
+        </Typography>
+        <Tooltip title="Settings">
+          <IconButton onClick={handleSettingsOpen} color="primary">
+            <Settings />
+          </IconButton>
+        </Tooltip>
+      </Box>
+
       {initializing ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', my: 4 }}>
           <CircularProgress />
           <Typography variant="body1" sx={{ ml: 2 }}>
-            Initializing authentication...
+            Initializing...
           </Typography>
         </Box>
       ) : (
@@ -879,7 +1215,8 @@ function App() {
           >
             {loading ? 'Processing...' : 'Process'}
           </Button>
-          <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
+          
+          <Box sx={{ mt: 2, display: 'flex', gap: 2, width: '100%' }}>
             <Button
               variant="contained"
               color="primary"
@@ -897,28 +1234,133 @@ function App() {
               disabled={onlyInResults.length === 0}
               startIcon={<Download />}
             >
-              Export Only in V2/V4
+              Export Only in V2/V4/Univius
             </Button>
           </Box>
+          
+          {/* Render the results table */}
+          {results.length > 0 && (
+            <Box sx={{ width: '100%', mt: 3 }}>
+              {renderResults()}
+            </Box>
+          )}
         </Box>
       )}
-      
-      {renderResults()}
 
-      <Snackbar
-        open={snackbar.open}
-        autoHideDuration={6000}
-        onClose={handleCloseSnackbar}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-      >
-        <Alert 
-          onClose={handleCloseSnackbar} 
-          severity={snackbar.severity} 
-          sx={{ width: '100%' }}
-        >
-          {snackbar.message}
-        </Alert>
-      </Snackbar>
+      {/* Settings Dialog */}
+      <Dialog open={settingsOpen} onClose={handleSettingsClose} maxWidth="md" fullWidth>
+        <DialogTitle>Application Settings</DialogTitle>
+        <DialogContent>
+          <Box sx={{ mt: 2, display: 'grid', gap: 2, gridTemplateColumns: '1fr 1fr' }}>
+            <Typography variant="h6" sx={{ gridColumn: '1 / -1', mt: 1 }}>API Configuration</Typography>
+            <TextField
+              label="API Base URL"
+              value={config.apiBaseUrl}
+              onChange={(e) => handleConfigChange('apiBaseUrl', e.target.value)}
+              fullWidth
+              size="small"
+            />
+            <TextField
+              label="API Endpoint V1.2"
+              value={config.apiEndpointV1}
+              onChange={(e) => handleConfigChange('apiEndpointV1', e.target.value)}
+              fullWidth
+              size="small"
+            />
+            <TextField
+              label="API Endpoint V2"
+              value={config.apiEndpointV2}
+              onChange={(e) => handleConfigChange('apiEndpointV2', e.target.value)}
+              fullWidth
+              size="small"
+            />
+
+            <Divider sx={{ gridColumn: '1 / -1', my: 1 }} />
+            <Typography variant="h6" sx={{ gridColumn: '1 / -1' }}>Keycloak Configuration</Typography>
+            
+            <TextField
+              label="Keycloak URL"
+              value={config.keycloakUrl}
+              onChange={(e) => handleConfigChange('keycloakUrl', e.target.value)}
+              fullWidth
+              size="small"
+              disabled={isTestingConnection}
+            />
+            <TextField
+              label="Realm"
+              value={config.keycloakRealm}
+              onChange={(e) => handleConfigChange('keycloakRealm', e.target.value)}
+              fullWidth
+              size="small"
+              disabled={isTestingConnection}
+            />
+            <TextField
+              label="Client ID"
+              value={config.keycloakClientId}
+              onChange={(e) => handleConfigChange('keycloakClientId', e.target.value)}
+              fullWidth
+              size="small"
+              disabled={isTestingConnection}
+            />
+            <TextField
+              label="Username"
+              value={config.keycloakUsername}
+              onChange={(e) => handleConfigChange('keycloakUsername', e.target.value)}
+              fullWidth
+              size="small"
+              disabled={isTestingConnection}
+            />
+            <TextField
+              label="Password"
+              type="password"
+              value={config.keycloakPassword}
+              onChange={(e) => handleConfigChange('keycloakPassword', e.target.value)}
+              fullWidth
+              size="small"
+              disabled={isTestingConnection}
+            />
+
+            {connectionStatus && (
+              <Box sx={{ 
+                gridColumn: '1 / -1',
+                p: 2,
+                borderRadius: 1,
+                bgcolor: connectionStatus.type === 'success' ? 'success.light' : 'error.light',
+                color: 'white'
+              }}>
+                {connectionStatus.message}
+              </Box>
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={testKeycloakConnection} 
+            color="primary"
+            variant="outlined"
+            disabled={isTestingConnection}
+            startIcon={isTestingConnection ? <CircularProgress size={20} /> : null}
+          >
+            {isTestingConnection ? 'Testing...' : 'Test Connection'}
+          </Button>
+          <Box sx={{ flex: 1 }} />
+          <Button 
+            onClick={handleResetSettings} 
+            color="error"
+            disabled={isTestingConnection}
+          >
+            Reset to Defaults
+          </Button>
+          <Button 
+            onClick={handleSettingsClose} 
+            color="primary"
+            variant="contained"
+            disabled={isTestingConnection}
+          >
+            Save & Close
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 }
