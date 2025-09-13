@@ -29,7 +29,7 @@ function App() {
   const [results, setResults] = useState([]);
   const [onlyInResults, setOnlyInResults] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('combined');
+  const [activeTab, setActiveTab] = useState('common');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
   const [initializing, setInitializing] = useState(true);
 
@@ -76,17 +76,22 @@ function App() {
         const name = names[i];
         try {
           const result = await apiService.processName(name);
+          console.log(result,"result");
+          
           
           // Compare SDN data between V2 and V4
-          const sdnComparison = compareSdnData(result.v2, result.v4);
+          const sdnComparison = compareSdnData(result.v1_2, result.v2);
+
+          console.log(sdnComparison,"sdnComparison");
+          
           
           // Update results with the new data
           setResults(prevResults => [
             ...prevResults,
             {
               name,
-              v2: result.v2,
-              v4: result.v4,
+              v2: result.v1_2,
+              v4: result.v2,
               _totalDuration: result._totalDuration,
               _sdnComparison: sdnComparison,
               id: `${name}-${Date.now()}-${i}` // Add a unique ID for each result
@@ -144,55 +149,77 @@ function App() {
 
   // Helper function to compare SDN data between V2 and V4
   const compareSdnData = (v2Data, v4Data) => {
-    // Extract unique SDN IDs from V2 and V4
-    const v2Sdns = new Set(
-      (v2Data?.responses || [])
-        .flatMap(item => item.rulesDetails?.sdnid || [])
-        .filter(Boolean)
-    );
-    
-    const v4Sdns = new Set(
-      (v4Data?.responses || [])
-        .flatMap(item => item.rulesDetails?.sdnid || [])
-        .filter(Boolean)
-    );
+    // Create a map of SDN ID to their positions and info in V2 response
+    const v2SdnInfo = new Map();
+    (v2Data?.responses || []).forEach((item, index) => {
+      const sdnId = item.rulesDetails?.sdnid;
+      if (sdnId) {
+        v2SdnInfo.set(sdnId, {
+          position: index + 1, // 1-based position
+          name: item.rulesDetails.sdnname || 'N/A',
+          reference: item.rulesDetails.sanctionReferenceName || ''
+        });
+      }
+    });
+
+    // Create a map of SDN ID to their positions in V4 response
+    const v4SdnPositions = new Map();
+    const v4Responses = v4Data?.responses || [];
+    v4Responses.forEach((item, index) => {
+      const sdnId = item.rulesDetails?.sdnid;
+      if (sdnId && !v4SdnPositions.has(sdnId)) {
+        v4SdnPositions.set(sdnId, index + 1); // 1-based position
+      }
+    });
 
     // Find SDNs in V2 but not in V4
     const onlyInV2 = [];
-    v2Sdns.forEach(sdnId => {
-      if (!v4Sdns.has(sdnId)) {
-        const sdnInfo = (v2Data?.responses || [])
-          .flatMap(item => item.rulesDetails || [])
-          .find(rule => rule.sdnid === sdnId);
-        if (sdnInfo) {
-          onlyInV2.push({
-            id: sdnId,
-            name: sdnInfo.sdnname || 'N/A',
-            reference: sdnInfo.sanctionReferenceName || ''
-          });
-        }
+    // Find SDNs in both V2 and V4
+    const inBoth = [];
+
+    v2SdnInfo.forEach((v2Info, sdnId) => {
+      const v4Position = v4SdnPositions.get(sdnId);
+      const sdnData = {
+        id: sdnId,
+        name: v2Info.name,
+        reference: v2Info.reference,
+        v2Position: v2Info.position,
+        v4Position: v4Position || null
+      };
+
+      if (v4Position) {
+        // SDN is in both V2 and V4
+        inBoth.push(sdnData);
+      } else {
+        // SDN is only in V2
+        onlyInV2.push(sdnData);
       }
     });
-
+  
     // Find SDNs in V4 but not in V2
     const onlyInV4 = [];
-    v4Sdns.forEach(sdnId => {
-      if (!v2Sdns.has(sdnId)) {
-        const sdnInfo = (v4Data?.responses || [])
-          .flatMap(item => item.rulesDetails || [])
-          .find(rule => rule.sdnid === sdnId);
-        if (sdnInfo) {
-          onlyInV4.push({
-            id: sdnId,
-            name: sdnInfo.sdnname || 'N/A',
-            reference: sdnInfo.sanctionReferenceName || ''
-          });
-        }
+    v4SdnPositions.forEach((v4Position, sdnId) => {
+      if (!v2SdnInfo.has(sdnId)) {
+        const v4Item = v4Responses.find(item => item.rulesDetails?.sdnid === sdnId)?.rulesDetails;
+        onlyInV4.push({
+          id: sdnId,
+          name: v4Item?.sdnname || 'N/A',
+          reference: v4Item?.sanctionReferenceName || '',
+          v2Position: null,
+          v4Position: v4Position
+        });
       }
     });
-
-    return { onlyInV2, onlyInV4 };
+  
+    return { 
+      onlyInV2, 
+      onlyInV4, 
+      inBoth,
+      v2SdnInfo,
+      v4SdnPositions
+    };
   };
+  
 
   // Helper function to split SDN list into chunks that fit within Excel's cell limit
   const splitSdnsForExport = (sdns) => {
@@ -231,6 +258,108 @@ function App() {
     return result;
   };
 
+  const exportToExcel = () => {
+    if (results.length === 0) {
+      showSnackbar('No data to export', 'warning');
+      return;
+    }
+    
+    try {
+      showSnackbar('Preparing export...', 'info', 0, true);
+      
+      // Prepare data for export
+      const exportData = [
+        ['Name', 'V2 Duration (ms)', 'V2 SDN Matches', 'V4 Duration (ms)', 'V4 SDN Matches', 'Status']
+      ];
+      
+      results.forEach((result) => {
+        const v2Sdns = result.v2?.responses?.length > 0 ? 
+          result.v2.responses.map(r => r.rulesDetails?.sdnname || 'N/A').join('\n') : 'No matches';
+        const v4Sdns = result.v4?.responses?.length > 0 ? 
+          result.v4.responses.map(r => r.rulesDetails?.sdnname || 'N/A').join('\n') : 'No matches';
+        
+        exportData.push([
+          result.name,
+          result.v2?._duration ? result.v2._duration.toFixed(2) : 'N/A',
+          v2Sdns,
+          result.v4?._duration ? result.v4._duration.toFixed(2) : 'N/A',
+          v4Sdns,
+          result.status || 'Completed'
+        ]);
+      });
+      
+      // Create worksheet with array of arrays
+      const ws = XLSX.utils.aoa_to_sheet(exportData);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 30 }, // Name
+        { wch: 15 }, // V2 Duration
+        { wch: 60 }, // V2 SDN Matches
+        { wch: 15 }, // V4 Duration
+        { wch: 60 }, // V4 SDN Matches
+        { wch: 15 }  // Status
+      ];
+      
+      // Create workbook and add worksheet
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'All Results');
+      
+      // Generate and save the Excel file
+      XLSX.writeFile(wb, `all_results_${new Date().toISOString().split('T')[0]}.xlsx`);
+      
+      showSnackbar('Export completed successfully!', 'success');
+    } catch (error) {
+      console.error('Export error:', error);
+      showSnackbar(`Export failed: ${error.message}`, 'error');
+    }
+  };
+
+  const exportCommonSdnsToExcel = () => {
+    if (onlyInResults.length === 0 || activeTab !== 'common') {
+      showSnackbar('No common SDNs to export', 'warning');
+      return;
+    }
+    
+    try {
+      showSnackbar('Preparing export...', 'info', 0, true);
+      
+      // Prepare data for export
+      const exportData = [
+        ['S.No.', 'Name', 'SDN ID', 'SDN Name', 'Position in V2', 'Position in V4', 'Reference']
+      ];
+      
+      onlyInResults.forEach((result, idx) => {
+        if (result.commonSdns && result.commonSdns.length > 0) {
+          result.commonSdns.forEach((sdn, sdnIdx) => {
+            exportData.push([
+              sdnIdx === 0 ? idx + 1 : '',
+              sdnIdx === 0 ? result.name : '',
+              sdn.id || 'N/A',
+              sdn.name || 'N/A',
+              sdn.v2Position || 'N/A',
+              sdn.v4Position || 'N/A',
+              sdn.reference || 'N/A'
+            ]);
+          });
+        }
+      });
+
+      // Create workbook and worksheet
+      const ws = XLSX.utils.aoa_to_sheet(exportData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Common SDNs');
+      
+      // Generate and save the Excel file
+      XLSX.writeFile(wb, `common_sdns_${new Date().toISOString().split('T')[0]}.xlsx`);
+      
+      showSnackbar('Export completed successfully!', 'success');
+    } catch (error) {
+      console.error('Export error:', error);
+      showSnackbar(`Export failed: ${error.message}`, 'error');
+    }
+  };
+
   const exportOnlyInToExcel = async () => {
     if (onlyInResults.length === 0) {
       showSnackbar('No "Only in V2/V4" data to export', 'warning');
@@ -238,7 +367,7 @@ function App() {
     }
     
     try {
-      const loadingSnackbar = showSnackbar('Preparing export...', 'info', 0);
+      showSnackbar('Preparing export...', 'info', 0, true);
       
       // Prepare data for export
       const exportData = [];
@@ -303,202 +432,7 @@ function App() {
       
       showSnackbar('Export successful!', 'success');
     } catch (error) {
-      console.error('Error exporting to Excel:', error);
-      showSnackbar(`Export failed: ${error.message}`, 'error');
-    }
-  };
-
-  const exportToExcel = async () => {
-    if (results.length === 0) {
-      showSnackbar('No data to export', 'warning');
-      return;
-    }
-
-    try {
-      // Show loading indicator
-      const loadingSnackbar = showSnackbar('Preparing export...', 'info', 0);
-      
-      // Process data in chunks to avoid memory issues
-      const CHUNK_SIZE = 100; // Smaller chunk size for better responsiveness
-      const exportData = [];
-      
-      for (let i = 0; i < results.length; i += CHUNK_SIZE) {
-        const chunk = results.slice(i, i + CHUNK_SIZE);
-        
-        // Process chunk
-        for (const result of chunk) {
-          // Get unique SDNs for V2 and V4
-          const v2Sdns = result.v2?.responses?.length > 0
-            ? result.v2.responses.map(item => ({
-                id: item.rulesDetails?.sdnid || 'N/A',
-                name: item.rulesDetails?.sdnname || 'N/A'
-              }))
-            : [];
-
-          const v4Sdns = result.v4?.responses?.length > 0
-            ? result.v4.responses.map(item => ({
-                id: item.rulesDetails?.sdnid || 'N/A',
-                name: item.rulesDetails?.sdnname || 'N/A'
-              }))
-            : [];
-
-          // Find SDNs only in V2 or only in V4
-          const onlyInV2 = v2Sdns.filter(v2 => 
-            !v4Sdns.some(v4 => v4.id === v2.id)
-          );
-          
-          const onlyInV4 = v4Sdns.filter(v4 => 
-            !v2Sdns.some(v2 => v2.id === v4.id)
-          );
-
-          // Split SDN lists into chunks that fit within Excel's cell limit
-          const v2Chunks = splitSdnsForExport(v2Sdns);
-          const onlyV2Chunks = splitSdnsForExport(onlyInV2);
-          const v4Chunks = splitSdnsForExport(v4Sdns);
-          const onlyV4Chunks = splitSdnsForExport(onlyInV4);
-          
-          // Calculate which version is faster
-          const v2Faster = result.v2?._duration && result.v4?._duration && 
-                          result.v2._duration < result.v4._duration;
-          const v4Faster = result.v2?._duration && result.v4?._duration && 
-                          result.v4._duration < result.v2._duration;
-          
-          // Determine how many rows we'll need for this result
-          const maxChunks = Math.max(
-            v2Chunks.length,
-            onlyV2Chunks.length,
-            v4Chunks.length,
-            onlyV4Chunks.length,
-            1 // At least one row
-          );
-          
-          // Create rows for this result
-          for (let i = 0; i < maxChunks; i++) {
-            const isFirstRow = i === 0;
-            const rowData = {
-              'Name': isFirstRow ? result.name : `(cont.) ${result.name}`,
-              'V2 Duration (ms)': isFirstRow ? (result.v2?._duration ? result.v2._duration.toFixed(2) : 'N/A') : '',
-              'V2 SDN Matches': v2Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
-              'Only in V2': onlyV2Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
-              'V4 Duration (ms)': isFirstRow ? (result.v4?._duration ? result.v4._duration.toFixed(2) : 'N/A') : '',
-              'V4 SDN Matches': v4Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
-              'Only in V4': onlyV4Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
-              'V2 Faster?': isFirstRow ? (v2Faster ? '✓' : '') : '',
-              'V4 Faster?': isFirstRow ? (v4Faster ? '✓' : '') : '',
-              'Total Duration (ms)': isFirstRow ? (result._totalDuration ? result._totalDuration.toFixed(2) : 'N/A') : ''
-            };
-            
-            exportData.push(rowData);
-          }
-        } // End of result processing
-        
-        // Update progress
-        const progress = Math.min(100, Math.round(((i + chunk.length) / results.length) * 100));
-        showSnackbar(`Processing... ${progress}%`, 'info', 0, loadingSnackbar);
-        
-        // Allow UI to update
-        await new Promise(resolve => setTimeout(resolve, 0));
-      }
-
-      // Create worksheet
-      const ws = XLSX.utils.json_to_sheet(exportData);
-      
-      // Set column widths
-      ws['!cols'] = [
-        {wch: 30}, // Name
-        {wch: 15}, // V2 Duration
-        {wch: 40}, // V2 SDN Matches
-        {wch: 40}, // Only in V2
-        {wch: 15}, // V4 Duration
-        {wch: 40}, // V4 SDN Matches
-        {wch: 40}, // Only in V4
-        {wch: 10}, // V2 Faster?
-        {wch: 10}, // V4 Faster?
-        {wch: 15}  // Total Duration
-      ];
-      
-      // Create workbook and add worksheet
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Screening Results');
-      
-      // Add styling to all cells
-      const range = XLSX.utils.decode_range(ws['!ref']);
-      
-      // Style header row
-      for (let C = range.s.c; C <= range.e.c; ++C) {
-        const cell = ws[XLSX.utils.encode_cell({r: 0, c: C})];
-        if (cell) {
-          cell.s = { 
-            font: { bold: true },
-            fill: { fgColor: { rgb: 'D3D3D3' } },
-            alignment: { wrapText: true, vertical: 'top' },
-            border: {
-              top: { style: 'thin' },
-              bottom: { style: 'thin' },
-              left: { style: 'thin' },
-              right: { style: 'thin' }
-            }
-          };
-        }
-      }
-      
-      // Style data rows with wrap text and borders
-      for (let R = range.s.r + 1; R <= range.e.r; ++R) {
-        // Set row height to auto
-        if (!ws['!rows']) ws['!rows'] = [];
-        ws['!rows'][R] = { hpx: 'auto', hpt: 'auto' };
-        
-        for (let C = range.s.c; C <= range.e.c; ++C) {
-          const cell = ws[XLSX.utils.encode_cell({r: R, c: C})];
-          if (cell) {
-            // Preserve existing styles if any
-            const existingStyle = cell.s || {};
-            cell.s = {
-              ...existingStyle,
-              alignment: { 
-                wrapText: true, 
-                vertical: 'top',
-                ...(existingStyle.alignment || {})
-              },
-              border: {
-                top: { style: 'thin' },
-                bottom: { style: 'thin' },
-                left: { style: 'thin' },
-                right: { style: 'thin' },
-                ...(existingStyle.border || {})
-              }
-            };
-          }
-        }
-      }
-      
-      // Set explicit column widths for better readability
-      ws['!cols'] = [
-        { wch: 30 }, // Name
-        { wch: 15 }, // V2 Duration
-        { wch: 40 }, // V2 SDN Matches
-        { wch: 40 }, // Only in V2
-        { wch: 15 }, // V4 Duration
-        { wch: 40 }, // V4 SDN Matches
-        { wch: 40 }, // Only in V4
-        { wch: 12 }, // V2 Faster?
-        { wch: 12 }, // V4 Faster?
-        { wch: 18 }  // Total Duration
-      ];
-      
-      // Generate and save the Excel file
-      showSnackbar('Generating Excel file...', 'info', 0, loadingSnackbar);
-      
-      // Use writeFile with options for better performance
-      XLSX.writeFile(wb, `screening_results_${new Date().toISOString().slice(0, 10)}.xlsx`, {
-        bookType: 'xlsx',
-        type: 'array',
-        compression: true
-      });
-      
-      showSnackbar('Export successful!', 'success');
-    } catch (error) {
-      console.error('Error exporting to Excel:', error);
+      console.error('Export error:', error);
       showSnackbar(`Export failed: ${error.message}`, 'error');
     }
   };
@@ -514,8 +448,8 @@ function App() {
   const handleTabChange = (event, newValue) => {
     setActiveTab(newValue);
     
-    // When switching to only-in tab, prepare the data
     if (newValue === 'onlyIn') {
+      // When switching to only-in tab, prepare the data
       const onlyInData = results.filter(result => {
         const v2Sdns = result.v2?.responses?.length > 0 ? result.v2.responses : [];
         const v4Sdns = result.v4?.responses?.length > 0 ? result.v4.responses : [];
@@ -533,6 +467,20 @@ function App() {
       });
       
       setOnlyInResults(onlyInData);
+    } else if (newValue === 'common') {
+      // When switching to common tab, prepare the common SDNs data
+      const commonData = [];
+      
+      results.forEach(result => {
+        if (result._sdnComparison?.inBoth?.length > 0) {
+          commonData.push({
+            name: result.name,
+            commonSdns: result._sdnComparison.inBoth
+          });
+        }
+      });
+      
+      setOnlyInResults(commonData);
     }
   };
 
@@ -550,7 +498,7 @@ function App() {
     const renderTable = (version = 'combined') => {
       // Define base headers
       const baseHeaders = [
-        '#', 'Name', 'API Version', 'SDN ID', 'SDN Name', 'Duration', 
+        '#', 'Name', 'API Version', 'SDN ID', 'SDN Name', 'Position in V4', 'Duration', 
         'V2 Faster?', 'V4 Faster?'
       ];
       
@@ -656,8 +604,18 @@ function App() {
 
                   // For each response, create a row with separate columns for ID and Name
                   return versionData.responses.map((item, i) => {
-                    const sdnId = item.rulesDetails?.sdnid || 'N/A';
-                    const sdnName = item.rulesDetails?.sdnname || 'N/A';
+                    // Handle both V2 (rulesDetails) and V4 (fields) response formats
+                    const sdnId = item.rulesDetails?.sdnid || item.fields?.sanction_id || 'N/A';
+                    const sdnName = item.rulesDetails?.sdnname || item.fields?.sdnname || 'N/A';
+                    // Get position in V4 for V2 SDNs
+                    let positionInV4 = 'N/A';
+                    if (versionKey === 'v2' && result._sdnComparison?.inBoth) {
+                      const sdnInBoth = result._sdnComparison.inBoth.find(sdn => sdn.id === sdnId);
+                      positionInV4 = sdnInBoth?.v4Position ?? 'N/A';
+                    } else if (versionKey === 'v4') {
+                      // For V4 rows, show their position in V4
+                      positionInV4 = i + 1;
+                    }
                     
                     return (
                       <TableRow key={`${versionKey}-${idx}-${i}`}>
@@ -676,6 +634,7 @@ function App() {
                         ) : null}
                         <TableCell>{sdnId}</TableCell>
                         <TableCell>{sdnName}</TableCell>
+                        <TableCell>{positionInV4}</TableCell>
                         {i === 0 && (
                           <>
                             <TableCell rowSpan={versionData.responses.length}>
@@ -747,10 +706,16 @@ function App() {
           onChange={handleTabChange}
           indicatorColor="primary"
           textColor="primary"
-          variant="fullWidth"
+          variant="scrollable"
+          scrollButtons="auto"
           aria-label="results tabs"
         >
           <Tab value="combined" label="Combined Results" />
+          <Tab 
+            value="common" 
+            label="Common SDNs" 
+            disabled={results.length === 0}
+          />
           <Tab 
             value="onlyIn" 
             label="Only in V2/V4" 
@@ -759,6 +724,44 @@ function App() {
         </Tabs>
         
         {activeTab === 'combined' && renderTable('combined')}
+        {activeTab === 'common' && onlyInResults.length > 0 && (
+          <TableContainer component={Paper} sx={{ mt: 2, maxHeight: '70vh', overflow: 'auto' }}>
+            <Table stickyHeader>
+              <TableHead>
+                <TableRow>
+                  <TableCell style={{ fontWeight: 'bold', width: '80px' }}>#</TableCell>
+                  <TableCell style={{ fontWeight: 'bold' }}>Name</TableCell>
+                  <TableCell style={{ fontWeight: 'bold' }}>SDN ID</TableCell>
+                  <TableCell style={{ fontWeight: 'bold' }}>SDN Name</TableCell>
+                  <TableCell style={{ fontWeight: 'bold' }}>Position in V2</TableCell>
+                  <TableCell style={{ fontWeight: 'bold' }}>Position in V4</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {onlyInResults.flatMap((result, idx) => 
+                  result.commonSdns.map((sdn, sdnIdx) => (
+                    <TableRow key={`common-${idx}-${sdnIdx}`}>
+                      {sdnIdx === 0 && (
+                        <>
+                          <TableCell rowSpan={result.commonSdns.length}>
+                            {idx + 1}
+                          </TableCell>
+                          <TableCell rowSpan={result.commonSdns.length}>
+                            {result.name}
+                          </TableCell>
+                        </>
+                      )}
+                      <TableCell>{sdn.id}</TableCell>
+                      <TableCell>{sdn.name}</TableCell>
+                      <TableCell>{sdn.v2Position || 'N/A'}</TableCell>
+                      <TableCell>{sdn.v4Position || 'N/A'}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
         {activeTab === 'onlyIn' && (
           <TableContainer component={Paper} sx={{ mt: 2, maxHeight: '70vh', overflow: 'auto' }}>
             <Table stickyHeader>
@@ -879,7 +882,7 @@ function App() {
           >
             {loading ? 'Processing...' : 'Process'}
           </Button>
-          <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
+          <Box sx={{ mt: 2, display: 'flex', gap: 2, flexWrap: 'wrap' }}>
             <Button
               variant="contained"
               color="primary"
@@ -894,10 +897,20 @@ function App() {
               variant="outlined"
               color="primary"
               onClick={exportOnlyInToExcel}
-              disabled={onlyInResults.length === 0}
+              disabled={onlyInResults.length === 0 || activeTab !== 'onlyIn'}
               startIcon={<Download />}
             >
               Export Only in V2/V4
+            </Button>
+
+            <Button
+              variant="outlined"
+              color="secondary"
+              onClick={exportCommonSdnsToExcel}
+              disabled={onlyInResults.length === 0 || activeTab !== 'common'}
+              startIcon={<Download />}
+            >
+              Export Common SDNs
             </Button>
           </Box>
         </Box>

@@ -12,18 +12,16 @@ const KEYCLOAK_CONFIG = {
   password: process.env.REACT_APP_KEYCLOAK_PASSWORD || 'superuser'
 };
 
-
 // API endpoints configuration
 const API_BASE_PATH = '/namecheck/rule-matching/';
 const API_ENDPOINTS = {
   v1_2: `${API_BASE_PATH}${process.env.REACT_APP_API_ENDPOINT_API_1 || 'v1.2'}`,
-  v2: `${API_BASE_PATH}${process.env.REACT_APP_API_ENDPOINT_API_2 || 'v2'}`
+  v2: process.env.REACT_APP_API_V2_URL || 'http://localhost:8080/api/search'
 };
 
 // Create axios instance with default config
 const api = axios.create({
   baseURL: API_BASE_URL,
-  // Removed timeout to allow requests to complete regardless of duration
   headers: {
     'Accept': 'application/json',
     'Accept-Language': 'en-US,en;q=0.9',
@@ -66,7 +64,6 @@ api.interceptors.request.use(
   async (config) => {
     let token = localStorage.getItem('authToken');
     
-    // If no token exists, get a new one
     if (!token) {
       token = await getAccessToken();
     }
@@ -77,9 +74,7 @@ api.interceptors.request.use(
     
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
 // Add response interceptor to handle 401 errors and refresh token
@@ -88,26 +83,17 @@ api.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config;
     
-    // If the error is 401 and we haven't tried to refresh yet
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
-      
       try {
-        // Get a new token
         const newToken = await getAccessToken();
-        
-        // Update the Authorization header
         originalRequest.headers.Authorization = `Bearer ${newToken}`;
-        
-        // Retry the original request with the new token
         return api(originalRequest);
-      } catch (error) {
-        // If refresh fails, clear the token and redirect to login
+      } catch (err) {
         localStorage.removeItem('authToken');
-        return Promise.reject(error);
+        return Promise.reject(err);
       }
     }
-    
     return Promise.reject(error);
   }
 );
@@ -116,9 +102,9 @@ const apiService = {
   // Process a single name through both APIs
   processName: async (name) => {
     const startTime = performance.now();
-    let v2Response, v4Response;
+    let v1Response, v2Response;
+    let v1Time = 0;
     let v2Time = 0;
-    let v4Time = 0;
     
     try {
       const payload = {
@@ -135,22 +121,49 @@ const apiService = {
           type: "Person",
           transactionType: "",
           flag: false,
-          limitFlag: 10000
+          limitFlag: 1000
         }]
       };
 
-      // Call both APIs with timing
+      // Call v1.2 API with JSON payload
+      const v1Start = performance.now();
+      v1Response = await api.post(API_ENDPOINTS.v1_2, payload);
+      v1Time = performance.now() - v1Start;
+
+      // Call v2 API with query params
       const v2Start = performance.now();
-      v2Response = await api.post(API_ENDPOINTS.v1_2, payload);
+      v2Response = await api.get(API_ENDPOINTS.v2, {
+        params: { q: name, limit: 3000 }
+      });
       v2Time = performance.now() - v2Start;
-
-      const v4Start = performance.now();
-      v4Response = await api.post(API_ENDPOINTS.v2, payload);
-      v4Time = performance.now() - v4Start;
-
+      
+      // Process V4 response to match expected format
+      let v4FormattedResponse = v2Response.data;
+      if (Array.isArray(v2Response.data)) {
+        // This is the V4 format - convert it to match our expected structure   
+        v4FormattedResponse = {
+          responses: v2Response.data.map(item => ({
+            rulesDetails: {
+              sdnid: item.fields?.sanction_id || '',
+              sdnname: item.fields?.sdnname || '',
+              sanctionReferenceName: item.fields?.sanction_reference_name || '',
+              countries: item.fields?.countries || '',
+              type: item.fields?.type || 'Person',
+              activeStatus: item.fields?.active_status || '',
+              lastUpdate: item.fields?.last_update || '',
+              category: item.fields?.category || '',
+              subCategory: item.fields?.sub_category || ''
+            },
+            nameMatchPercentage: item.score || 0,
+            overAllPercentage: item.score || 0,
+            action: 'Automated Normal Match'
+          }))
+        };
+      }
+      
       return {
-        v2: { ...v2Response.data, _duration: v2Time },
-        v4: { ...v4Response.data, _duration: v4Time },
+        v1_2: { ...v1Response.data, _duration: v1Time },
+        v2: { responses: v4FormattedResponse.responses || [], _duration: v2Time },
         name,
         _totalDuration: performance.now() - startTime
       };
@@ -190,8 +203,3 @@ const apiService = {
 };
 
 export default apiService;
-
-
-
-
-
