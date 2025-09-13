@@ -26,17 +26,32 @@ import axios from 'axios';
 
 // Default configuration
 const DEFAULT_CONFIG = {
-  apiBaseUrl: 'https://screeningdevv2.ap.loclx.io',
-  keycloakUrl: 'https://keycloak-auth.inside10d.com',
-  keycloakRealm: 'ScreeningApp',
-  keycloakClientId: 'screening-client',
-  keycloakUsername: 'superuser',
-  keycloakPassword: 'superuser',
-  apiEndpointV1: 'v1.2',
-  apiEndpointV2: 'v2'
+  // API 1 Configuration - Full URL including the endpoint
+  api1: {
+    url: 'https://uat-ruleengine-screeningcf.digitalmta.com/namecheck/rule-matching/v2',
+    keycloak: {
+      url: 'https://keycloak-auth.inside10d.com',
+      realm: 'ScreeningApp',
+      clientId: 'screening-client',
+      username: 'superuser',
+      password: 'superuser'
+    }
+  },
+  // API 2 Configuration - Base URL only, endpoint will be appended
+  api2: {
+    url: 'https://uat-ruleengine-screeningcf.digitalmta.com',
+    keycloak: {
+      url: 'https://keycloak-auth.inside10d.com',
+      realm: 'ScreeningApp',
+      clientId: 'screening-client',
+      username: 'superuser',
+      password: 'superuser'
+    }
+  }
 };
 
 function App() {
+  // State declarations - all hooks must be called unconditionally at the top level
   const [file, setFile] = useState(null);
   const [results, setResults] = useState([]);
   const [onlyInResults, setOnlyInResults] = useState([]);
@@ -44,69 +59,196 @@ function App() {
   const [activeTab, setActiveTab] = useState('combined');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [config, setConfig] = useState(() => {
-    // Load saved config from localStorage or use defaults
-    const savedConfig = localStorage.getItem('appConfig');
-    return savedConfig ? JSON.parse(savedConfig) : DEFAULT_CONFIG;
-  });
+  const [config, setConfig] = useState(DEFAULT_CONFIG); // Initialize with defaults
   const [initializing, setInitializing] = useState(true);
-
-  // Save config to localStorage when it changes
+  const [configLoaded, setConfigLoaded] = useState(false);
+  
+  // Initialize config from localStorage or use defaults
   useEffect(() => {
-    localStorage.setItem('appConfig', JSON.stringify(config));
-    // Update API service with new config
-    apiService.updateConfig({
-      apiBaseUrl: config.apiBaseUrl,
-      keycloakConfig: {
-        url: config.keycloakUrl,
-        realm: config.keycloakRealm,
-        clientId: config.keycloakClientId,
-        username: config.keycloakUsername,
-        password: config.keycloakPassword
-      },
-      apiEndpoints: {
-        v1_2: config.apiEndpointV1,
-        v2: config.apiEndpointV2
-      }
-    });
-  }, [config]);
-
-  useEffect(() => {
-    // Initialize by getting the first access token
-    const initializeAuth = async () => {
+    // Only run this effect once on component mount
+    if (configLoaded) return;
+    
+    const loadConfig = () => {
       try {
-        console.log('Initializing authentication...');
-        const token = await apiService.getAccessToken();
-        console.log('Successfully obtained access token');
-        setInitializing(false);
-      } catch (error) {
-        console.error('Initialization error:', error);
-        let errorMessage = error.message || 'Failed to initialize authentication';
+        const savedConfig = localStorage.getItem('appConfig');
+        let initialConfig = DEFAULT_CONFIG;
         
-        // Extract more detailed error message if available
-        if (error.originalError?.response?.data?.error_description) {
-          errorMessage = error.originalError.response.data.error_description;
-        } else if (error.originalError?.message) {
-          errorMessage = error.originalError.message;
+        // Only try to parse saved config if it exists
+        if (savedConfig) {
+          try {
+            const parsedConfig = JSON.parse(savedConfig);
+            // Only use the saved config if it has the expected structure
+            if (parsedConfig?.api1 && parsedConfig?.api2) {
+              initialConfig = parsedConfig;
+            }
+          } catch (e) {
+            console.warn('Invalid saved config, using defaults', e);
+          }
         }
         
-        setSnackbar({
-          open: true,
-          message: `Authentication Error: ${errorMessage}`,
-          severity: 'error'
+        // Ensure all required fields are present with proper defaults
+        const completeConfig = {
+          api1: { ...DEFAULT_CONFIG.api1, ...(initialConfig?.api1 || {}) },
+          api2: { ...DEFAULT_CONFIG.api2, ...(initialConfig?.api2 || {}) }
+        };
+        
+        // Update the config state
+        setConfig(completeConfig);
+        console.log('Config loaded successfully:', completeConfig);
+      } catch (error) {
+        console.error('Error loading config:', error);
+        // Already initialized with defaults
+      } finally {
+        setConfigLoaded(true);
+      }
+    };
+    
+    loadConfig();
+  }, [configLoaded]); // Only depend on configLoaded
+
+  // Save config to localStorage and update API service when config changes
+  useEffect(() => {
+    if (!configLoaded || !config) return; // Skip if config hasn't been loaded yet
+    
+    const updateApiConfig = async () => {
+      try {
+        // Save to localStorage
+        localStorage.setItem('appConfig', JSON.stringify(config));
+        
+        // Update API service with new config for both APIs
+        await apiService.updateConfig({
+          api1: {
+            url: config.api1?.url || DEFAULT_CONFIG.api1.url,
+            keycloak: {
+              url: config.api1?.keycloak?.url || DEFAULT_CONFIG.api1.keycloak.url,
+              realm: config.api1?.keycloak?.realm || DEFAULT_CONFIG.api1.keycloak.realm,
+              clientId: config.api1?.keycloak?.clientId || DEFAULT_CONFIG.api1.keycloak.clientId,
+              username: config.api1?.keycloak?.username || DEFAULT_CONFIG.api1.keycloak.username,
+              password: config.api1?.keycloak?.password || DEFAULT_CONFIG.api1.keycloak.password
+            }
+          },
+          api2: {
+            url: config.api2?.url || DEFAULT_CONFIG.api2.url,
+            keycloak: {
+              url: config.api2?.keycloak?.url || DEFAULT_CONFIG.api2.keycloak.url,
+              realm: config.api2?.keycloak?.realm || DEFAULT_CONFIG.api2.keycloak.realm,
+              clientId: config.api2?.keycloak?.clientId || DEFAULT_CONFIG.api2.keycloak.clientId,
+              username: config.api2?.keycloak?.username || DEFAULT_CONFIG.api2.keycloak.username,
+              password: config.api2?.keycloak?.password || DEFAULT_CONFIG.api2.keycloak.password
+            }
+          }
         });
         
-        // Open settings if this is the first initialization
+        // Set initializing to false once config is loaded and applied
         if (initializing) {
-          setSettingsOpen(true);
+          setInitializing(false);
+        }
+      } catch (error) {
+        console.error('Error updating config:', error);
+        showSnackbar('Failed to update configuration', 'error');
+        
+        // If we're initializing and there's an error, use default config
+        if (initializing) {
+          setConfig(DEFAULT_CONFIG);
+        }
+      }
+    };
+    
+    updateApiConfig();
+  }, [config, initializing, configLoaded]);
+
+  // Initialize authentication for both APIs once config is loaded
+  useEffect(() => {
+    if (!configLoaded || !initializing) return;
+    
+    const initializeAuth = async () => {
+      const authResults = {
+        api1: { success: false, error: null },
+        api2: { success: false, error: null }
+      };
+      
+      // Function to initialize a single API's authentication
+      const initApiAuth = async (apiName) => {
+        try {
+          console.log(`Initializing authentication for ${apiName}...`);
+          
+          // Ensure we have valid config before proceeding
+          if (!config?.[apiName]?.keycloak?.url) {
+            throw new Error(`${apiName} configuration is not properly initialized`);
+          }
+          
+          const token = await apiService.getAccessToken(apiName);
+          console.log(`Successfully obtained access token for ${apiName}`);
+          authResults[apiName] = { success: true };
+          return true;
+        } catch (error) {
+          console.error(`${apiName} Initialization error:`, error);
+          let errorMessage = error.message || `Failed to initialize authentication for ${apiName}`;
+          
+          // Extract more detailed error message if available
+          if (error.response?.data?.error_description) {
+            errorMessage = error.response.data.error_description;
+          } else if (error.details?.message) {
+            errorMessage = error.details.message;
+          }
+          
+          authResults[apiName] = { success: false, error: errorMessage };
+          return false;
+        }
+      };
+      
+      try {
+        // Initialize both APIs in parallel
+        await Promise.all([
+          initApiAuth('api1'),
+          initApiAuth('api2')
+        ]);
+        
+        // Check if any authentication failed
+        const allSucceeded = authResults.api1.success && authResults.api2.success;
+        const anySucceeded = authResults.api1.success || authResults.api2.success;
+        
+        if (!allSucceeded) {
+          // Build error message for failed authentications
+          const errorMessages = [];
+          if (!authResults.api1.success) {
+            errorMessages.push(`API1: ${authResults.api1.error}`);
+          }
+          if (!authResults.api2.success) {
+            errorMessages.push(`API2: ${authResults.api2.error}`);
+          }
+          
+          setSnackbar({
+            open: true,
+            message: `Authentication issues: ${errorMessages.join('; ')}`,
+            severity: 'warning',
+            autoHideDuration: 15000 // Show for 15 seconds
+          });
+          
+          // Only open settings if no APIs could authenticate
+          if (!anySucceeded) {
+            setSettingsOpen(true);
+          }
         }
         
+        console.log('Authentication initialization complete:', authResults);
+        
+      } catch (error) {
+        console.error('Error during authentication initialization:', error);
+        setSnackbar({
+          open: true,
+          message: `Error during authentication: ${error.message}`,
+          severity: 'error',
+          autoHideDuration: 10000
+        });
+        setSettingsOpen(true);
+      } finally {
         setInitializing(false);
       }
     };
 
     initializeAuth();
-  }, [initializing]);
+  }, [configLoaded, initializing, config]);
 
   const handleFileChange = (e) => {
     setFile(e.target.files[0]);
@@ -130,33 +272,55 @@ function App() {
       const data = await readExcel(file);
       const names = extractNames(data);
       
-      // Process each name and update results in real-time
+      // Process each name sequentially
       for (let i = 0; i < names.length; i++) {
         const name = names[i];
+        const nameStartTime = performance.now();
+        
         try {
-          const result = await apiService.processName(name);
+          console.log(`=== Processing name ${i+1}/${names.length}: ${name} ===`);
+          
+          // Process with both APIs sequentially
+          const result = await apiService.processNameWithBothApis(name);
           
           // Compare SDN data between V2, V4, and Univius
-          const sdnComparison = compareSdnData(result.v2, result.v4, result.univius);
+          const sdnComparison = compareSdnData(
+            result.api1?.responses, 
+            result.api2?.responses, 
+            result.univius
+          );
+          
+          const nameEndTime = performance.now();
+          const nameDuration = nameEndTime - nameStartTime;
+          
+          console.log(`Completed processing name: ${name} in ${nameDuration.toFixed(2)}ms`);
           
           // Update results with the new data
-          setResults(prevResults => [
-            ...prevResults,
-            {
-              name,
-              v2: result.v2,
-              v4: result.v4,
-              univius: result.univius,
-              _totalDuration: result._totalDuration,
-              _sdnComparison: sdnComparison,
-              id: `${name}-${Date.now()}-${i}` // Add a unique ID for each result
-            }
-          ]);
+          const newResult = {
+            name,
+            v2: result.api1,  // API1 results as V2
+            v4: result.api2,  // API2 results as V4
+            univius: result.univius,
+            _timing: {
+              ...result._timing,
+              nameProcessingStart: nameStartTime,
+              nameProcessingEnd: nameEndTime,
+              nameProcessingDuration: nameDuration
+            },
+            _sdnComparison: sdnComparison,
+            id: `${name}-${Date.now()}-${i}`,
+            _apiResults: result // Store full API results for debugging
+          };
           
-          // Show a snackbar for the first few results or on completion
-          if (i === 0) {
-            showSnackbar('Processing started. Results will appear below as they are ready.', 'info');
-          }
+          setResults(prevResults => [...prevResults, newResult]);
+          
+          // Update progress
+          const progress = Math.round(((i + 1) / names.length) * 100);
+          showSnackbar(`Processing... ${progress}% (${i+1}/${names.length} names)`, 'info', 1000);
+          
+          // Small delay to allow UI to update
+          await new Promise(resolve => setTimeout(resolve, 50));
+          
         } catch (error) {
           console.error(`Error processing name: ${name}`, error);
           // Add a failed entry to results
@@ -165,6 +329,12 @@ function App() {
             {
               name,
               error: `Error: ${error.message}`,
+              _timing: {
+                nameProcessingStart: nameStartTime,
+                nameProcessingEnd: performance.now(),
+                nameProcessingDuration: performance.now() - nameStartTime,
+                error: true
+              },
               id: `${name}-error-${Date.now()}-${i}`
             }
           ]);
@@ -469,11 +639,25 @@ function App() {
           const univiusChunks = splitSdnsForExport(univiusSdns);
           const onlyUniviusChunks = splitSdnsForExport(onlyInUnivius);
           
-          // Calculate which version is faster
+          // Get timing information
+          const getTimingInfo = (apiResult, apiName) => {
+            if (!apiResult) return { duration: 0, totalDuration: 0, preRequest: 0 };
+            return {
+              duration: apiResult._duration || 0,
+              totalDuration: apiResult._totalDuration || 0,
+              preRequest: apiResult._timing?.preRequest || 0
+            };
+          };
+
+          const v2Timing = getTimingInfo(result.v2, 'v2');
+          const v4Timing = getTimingInfo(result.v4, 'v4');
+          const univiusTiming = getTimingInfo(result.univius, 'univius');
+          
+          // Calculate which version is faster (using network duration)
           const durations = {
-            v2: result.v2?._duration || 0,
-            v4: result.v4?._duration || 0,
-            univius: result.univius?._duration || 0
+            v2: v2Timing.duration,
+            v4: v4Timing.duration,
+            univius: univiusTiming.duration
           };
           
           const fastestApi = Object.entries(durations).reduce((a, b) => 
@@ -493,21 +677,29 @@ function App() {
           // Create rows for this result
           for (let i = 0; i < maxChunks; i++) {
             const isFirstRow = i === 0;
+            const formatTime = (time) => time ? time.toFixed(2) : 'N/A';
+            
             const rowData = {
               'Name': isFirstRow ? result.name : `(cont.) ${result.name}`,
               
               // V2 Data
-              'V2 Duration (ms)': isFirstRow ? (durations.v2 ? durations.v2.toFixed(2) : 'N/A') : '',
+              'V2 Network Time (ms)': isFirstRow ? formatTime(v2Timing.duration) : '',
+              'V2 Total Time (ms)': isFirstRow ? formatTime(v2Timing.totalDuration) : '',
+              'V2 Pre-Request (ms)': isFirstRow ? formatTime(v2Timing.preRequest) : '',
               'V2 SDN Matches': v2Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
               'Only in V2': onlyV2Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
               
               // V4 Data
-              'V4 Duration (ms)': isFirstRow ? (durations.v4 ? durations.v4.toFixed(2) : 'N/A') : '',
+              'V4 Network Time (ms)': isFirstRow ? formatTime(v4Timing.duration) : '',
+              'V4 Total Time (ms)': isFirstRow ? formatTime(v4Timing.totalDuration) : '',
+              'V4 Pre-Request (ms)': isFirstRow ? formatTime(v4Timing.preRequest) : '',
               'V4 SDN Matches': v4Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
               'Only in V4': onlyV4Chunks[i]?.content || (isFirstRow ? 'No matches' : ''),
               
               // Univius Data
-              'Univius Duration (ms)': isFirstRow ? (durations.univius ? durations.univius.toFixed(2) : 'N/A') : '',
+              'Univius Network Time (ms)': isFirstRow ? formatTime(univiusTiming.duration) : '',
+              'Univius Total Time (ms)': isFirstRow ? formatTime(univiusTiming.totalDuration) : '',
+              'Univius Pre-Request (ms)': isFirstRow ? formatTime(univiusTiming.preRequest) : '',
               'Univius SDN Matches': univiusChunks[i]?.content || (isFirstRow ? 'No matches' : ''),
               'Only in Univius': onlyUniviusChunks[i]?.content || (isFirstRow ? 'No matches' : ''),
               
@@ -517,7 +709,11 @@ function App() {
                  fastestApi === 'v4' ? 'V4' : 
                  fastestApi === 'univius' ? 'Univius' : 'N/A') : '',
               
-              'Total Duration (ms)': isFirstRow ? (result._totalDuration ? result._totalDuration.toFixed(2) : 'N/A') : ''
+              'Total Duration (ms)': isFirstRow ? formatTime(Math.max(
+                v2Timing.totalDuration,
+                v4Timing.totalDuration,
+                univiusTiming.totalDuration
+              )) : ''
             };
             
             exportData.push(rowData);
@@ -540,17 +736,23 @@ function App() {
         {wch: 30}, // Name
         
         // V2 Columns
-        {wch: 15}, // V2 Duration
+        {wch: 15}, // V2 Network Time
+        {wch: 15}, // V2 Total Time
+        {wch: 15}, // V2 Pre-Request
         {wch: 40}, // V2 SDN Matches
         {wch: 40}, // Only in V2
         
         // V4 Columns
-        {wch: 15}, // V4 Duration
+        {wch: 15}, // V4 Network Time
+        {wch: 15}, // V4 Total Time
+        {wch: 15}, // V4 Pre-Request
         {wch: 40}, // V4 SDN Matches
         {wch: 40}, // Only in V4
         
         // Univius Columns
-        {wch: 15}, // Univius Duration
+        {wch: 15}, // Univius Network Time
+        {wch: 15}, // Univius Total Time
+        {wch: 15}, // Univius Pre-Request
         {wch: 40}, // Univius SDN Matches
         {wch: 40}, // Only in Univius
         
@@ -1087,34 +1289,29 @@ function App() {
     setConnectionStatus(null);
   };
 
-  const handleConfigChange = (field, value) => {
-    setConfig(prev => ({
-      ...prev,
-      [field]: value
-    }));
+  const handleConfigChange = (api, field, value, isKeycloak = false) => {
+    setConfig(prev => {
+      const newConfig = { ...prev };
+      if (isKeycloak) {
+        newConfig[api].keycloak[field] = value;
+      } else if (field === 'url') {
+        newConfig[api].url = value;
+      }
+      return newConfig;
+    });
     setConnectionStatus(null); // Reset status when config changes
   };
 
-  const testKeycloakConnection = async () => {
+  const testKeycloakConnection = async (apiName) => {
     setIsTestingConnection(true);
     setConnectionStatus(null);
     
     try {
-      // Create a temporary config with current form values
-      const tempConfig = {
-        ...config,
-        keycloakConfig: {
-          url: config.keycloakUrl,
-          realm: config.keycloakRealm,
-          clientId: config.keycloakClientId,
-          username: config.keycloakUsername,
-          password: config.keycloakPassword
-        }
-      };
+      const apiConfig = config[apiName];
       
       // Test the connection
       const testApi = axios.create({
-        baseURL: config.apiBaseUrl,
+        baseURL: apiConfig.url,
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/x-www-form-urlencoded'
@@ -1123,19 +1320,25 @@ function App() {
       });
       
       const params = new URLSearchParams();
-      params.append('client_id', tempConfig.keycloakConfig.clientId);
-      params.append('username', tempConfig.keycloakConfig.username);
-      params.append('password', tempConfig.keycloakConfig.password);
+      params.append('client_id', apiConfig.keycloak.clientId);
+      params.append('username', apiConfig.keycloak.username);
+      params.append('password', apiConfig.keycloak.password);
       params.append('grant_type', 'password');
       
-      const tokenUrl = `${tempConfig.keycloakConfig.url}/realms/${tempConfig.keycloakConfig.realm}/protocol/openid-connect/token`;
+      const tokenUrl = `${apiConfig.keycloak.url}/realms/${apiConfig.keycloak.realm}/protocol/openid-connect/token`;
       
       const response = await testApi.post(tokenUrl, params);
       
       if (response.data?.access_token) {
-        setConnectionStatus({ type: 'success', message: 'Successfully connected to Keycloak!' });
+        setConnectionStatus({ 
+          type: 'success', 
+          message: `Successfully connected to ${apiName} Keycloak!` 
+        });
       } else {
-        setConnectionStatus({ type: 'error', message: 'Connection successful but no token received' });
+        setConnectionStatus({ 
+          type: 'error', 
+          message: `Connection to ${apiName} successful but no token received` 
+        });
       }
     } catch (error) {
       console.error('Connection test failed:', error);
@@ -1166,6 +1369,16 @@ function App() {
       setConfig(DEFAULT_CONFIG);
     }
   };
+
+  // Show loading state until config is loaded
+  if (!configLoaded) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" minHeight="100vh">
+        <CircularProgress />
+        <Box ml={2}>Loading configuration...</Box>
+      </Box>
+    );
+  }
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -1251,74 +1464,156 @@ function App() {
       <Dialog open={settingsOpen} onClose={handleSettingsClose} maxWidth="md" fullWidth>
         <DialogTitle>Application Settings</DialogTitle>
         <DialogContent>
-          <Box sx={{ mt: 2, display: 'grid', gap: 2, gridTemplateColumns: '1fr 1fr' }}>
-            <Typography variant="h6" sx={{ gridColumn: '1 / -1', mt: 1 }}>API Configuration</Typography>
-            <TextField
-              label="API Base URL"
-              value={config.apiBaseUrl}
-              onChange={(e) => handleConfigChange('apiBaseUrl', e.target.value)}
-              fullWidth
-              size="small"
-            />
-            <TextField
-              label="API Endpoint V1.2"
-              value={config.apiEndpointV1}
-              onChange={(e) => handleConfigChange('apiEndpointV1', e.target.value)}
-              fullWidth
-              size="small"
-            />
-            <TextField
-              label="API Endpoint V2"
-              value={config.apiEndpointV2}
-              onChange={(e) => handleConfigChange('apiEndpointV2', e.target.value)}
-              fullWidth
-              size="small"
-            />
+          <Box sx={{ mt: 2, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {/* API 1 Section */}
+            <Box sx={{ p: 2, border: '1px solid #e0e0e0', borderRadius: 1 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">API 1 Configuration</Typography>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => testKeycloakConnection('api1')}
+                  disabled={isTestingConnection}
+                  startIcon={isTestingConnection ? <CircularProgress size={20} /> : null}
+                >
+                  {isTestingConnection ? 'Testing...' : 'Test Connection'}
+                </Button>
+              </Box>
+              <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: '1fr 1fr' }}>
+                <TextField
+                  label="API 1 URL"
+                  value={config.api1.url}
+                  onChange={(e) => handleConfigChange('api1', 'url', e.target.value)}
+                  fullWidth
+                  size="small"
+                  placeholder="https://example.com/api/v1"
+                />
+                
+                <Box sx={{ gridColumn: '1 / -1', mt: 2 }}>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                    <Typography variant="subtitle2">Keycloak Configuration</Typography>
+                  </Box>
+                  <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: '1fr 1fr' }}>
+                    <TextField
+                      label="Keycloak URL"
+                      value={config.api1.keycloak.url}
+                      onChange={(e) => handleConfigChange('api1', 'url', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                    <TextField
+                      label="Realm"
+                      value={config.api1.keycloak.realm}
+                      onChange={(e) => handleConfigChange('api1', 'realm', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                    <TextField
+                      label="Client ID"
+                      value={config.api1.keycloak.clientId}
+                      onChange={(e) => handleConfigChange('api1', 'clientId', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                    <TextField
+                      label="Username"
+                      value={config.api1.keycloak.username}
+                      onChange={(e) => handleConfigChange('api1', 'username', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                    <TextField
+                      label="Password"
+                      type="password"
+                      value={config.api1.keycloak.password}
+                      onChange={(e) => handleConfigChange('api1', 'password', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                  </Box>
+                </Box>
+              </Box>
+            </Box>
 
-            <Divider sx={{ gridColumn: '1 / -1', my: 1 }} />
-            <Typography variant="h6" sx={{ gridColumn: '1 / -1' }}>Keycloak Configuration</Typography>
-            
-            <TextField
-              label="Keycloak URL"
-              value={config.keycloakUrl}
-              onChange={(e) => handleConfigChange('keycloakUrl', e.target.value)}
-              fullWidth
-              size="small"
-              disabled={isTestingConnection}
-            />
-            <TextField
-              label="Realm"
-              value={config.keycloakRealm}
-              onChange={(e) => handleConfigChange('keycloakRealm', e.target.value)}
-              fullWidth
-              size="small"
-              disabled={isTestingConnection}
-            />
-            <TextField
-              label="Client ID"
-              value={config.keycloakClientId}
-              onChange={(e) => handleConfigChange('keycloakClientId', e.target.value)}
-              fullWidth
-              size="small"
-              disabled={isTestingConnection}
-            />
-            <TextField
-              label="Username"
-              value={config.keycloakUsername}
-              onChange={(e) => handleConfigChange('keycloakUsername', e.target.value)}
-              fullWidth
-              size="small"
-              disabled={isTestingConnection}
-            />
-            <TextField
-              label="Password"
-              type="password"
-              value={config.keycloakPassword}
-              onChange={(e) => handleConfigChange('keycloakPassword', e.target.value)}
-              fullWidth
-              size="small"
-              disabled={isTestingConnection}
-            />
+            {/* API 2 Section */}
+            <Box sx={{ p: 2, border: '1px solid #e0e0e0', borderRadius: 1 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">API 2 Configuration</Typography>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => testKeycloakConnection('api2')}
+                  disabled={isTestingConnection}
+                  startIcon={isTestingConnection ? <CircularProgress size={20} /> : null}
+                >
+                  {isTestingConnection ? 'Testing...' : 'Test Connection'}
+                </Button>
+              </Box>
+              <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: '1fr 1fr' }}>
+                <TextField
+                  label="API 2 URL"
+                  value={config.api2.url}
+                  onChange={(e) => handleConfigChange('api2', 'url', e.target.value)}
+                  fullWidth
+                  size="small"
+                  placeholder="https://example.com/api/v2"
+                />
+                
+                <Box sx={{ gridColumn: '1 / -1', mt: 2 }}>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                    <Typography variant="subtitle2">Keycloak Configuration</Typography>
+                  </Box>
+                  <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: '1fr 1fr' }}>
+                    <TextField
+                      label="Keycloak URL"
+                      value={config.api2.keycloak.url}
+                      onChange={(e) => handleConfigChange('api2', 'url', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                    <TextField
+                      label="Realm"
+                      value={config.api2.keycloak.realm}
+                      onChange={(e) => handleConfigChange('api2', 'realm', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                    <TextField
+                      label="Client ID"
+                      value={config.api2.keycloak.clientId}
+                      onChange={(e) => handleConfigChange('api2', 'clientId', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                    <TextField
+                      label="Username"
+                      value={config.api2.keycloak.username}
+                      onChange={(e) => handleConfigChange('api2', 'username', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                    <TextField
+                      label="Password"
+                      type="password"
+                      value={config.api2.keycloak.password}
+                      onChange={(e) => handleConfigChange('api2', 'password', e.target.value, true)}
+                      fullWidth
+                      size="small"
+                      disabled={isTestingConnection}
+                    />
+                  </Box>
+                </Box>
+              </Box>
+            </Box>
 
             {connectionStatus && (
               <Box sx={{ 
